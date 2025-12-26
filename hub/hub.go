@@ -59,6 +59,9 @@ type Hub struct {
 	// Process management (optional)
 	pm *process.ProcessManager
 
+	// Subprocess router
+	subRouter *SubprocessRouter
+
 	// Command registry
 	commands *CommandRegistry
 
@@ -111,6 +114,9 @@ func New(config Config) *Hub {
 		h.pm = process.NewProcessManager(config.ProcessConfig)
 	}
 
+	// Create subprocess router
+	h.subRouter = NewSubprocessRouter(h)
+
 	// Register built-in commands
 	h.registerBuiltinCommands()
 
@@ -162,6 +168,9 @@ func (h *Hub) registerBuiltinCommands() {
 		SubVerbs: []string{"REGISTER", "UNREGISTER", "HEARTBEAT", "LIST", "GET"},
 		Handler:  h.handleSession,
 	})
+
+	// SUBPROCESS commands (via SubprocessRouter)
+	h.subRouter.RegisterSubprocessCommands()
 }
 
 // RegisterCommand adds a custom command handler.
