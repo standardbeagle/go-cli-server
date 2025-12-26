@@ -1,5 +1,7 @@
 # Binaries
-counter-subprocess
-echo-subprocess
+/counter-subprocess
+/echo-subprocess
+/go-cli-hub
+/hubctl
 *.exe
 
