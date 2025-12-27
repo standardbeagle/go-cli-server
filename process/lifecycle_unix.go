@@ -8,9 +8,11 @@ import (
 )
 
 // setProcAttr sets platform-specific process attributes for Unix systems.
+// Each child process gets its own process group so we can signal it
+// independently without affecting other processes or the parent daemon.
 func setProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: false, // Inherit parent's process group
+		Setpgid: true, // Create new process group for this process
 	}
 }
 
