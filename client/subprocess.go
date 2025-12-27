@@ -226,7 +226,7 @@ func (c *subprocessConn) handleConnection() {
 		}
 
 		// Set read deadline for responsiveness
-		c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		_ = c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 		cmd, err := c.parser.ParseCommand()
 		if err != nil {
@@ -239,7 +239,7 @@ func (c *subprocessConn) handleConnection() {
 			}
 			// Check for unknown command - respond with error but keep connection
 			if unknownErr, ok := err.(*protocol.ErrUnknownCommand); ok {
-				c.writeResponse(&protocol.Response{
+				_ = c.writeResponse(&protocol.Response{
 					Type:    protocol.ResponseErr,
 					Code:    string(protocol.ErrInvalidCommand),
 					Message: fmt.Sprintf("unknown command: %s", unknownErr.Verb),
@@ -256,7 +256,7 @@ func (c *subprocessConn) handleConnection() {
 		// Handle the command
 		resp := c.handleCommand(cmd)
 		if resp != nil {
-			c.writeResponse(resp)
+			_ = c.writeResponse(resp)
 		}
 	}
 }

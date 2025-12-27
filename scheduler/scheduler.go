@@ -252,17 +252,19 @@ func (s *Scheduler) deliverTask(task *Task) {
 }
 
 // persistTask saves the task state to persistent storage.
+// Errors are intentionally ignored as persistence is best-effort.
 func (s *Scheduler) persistTask(task *Task) {
 	if s.config.StateManager != nil {
-		s.config.StateManager.SaveTask(task)
+		_ = s.config.StateManager.SaveTask(task)
 	}
 }
 
 // removeTaskFromStorage removes a completed/failed/cancelled task.
+// Errors are intentionally ignored as persistence is best-effort.
 func (s *Scheduler) removeTaskFromStorage(task *Task) {
 	s.tasks.Delete(task.ID)
 	if s.config.StateManager != nil {
-		s.config.StateManager.RemoveTask(task.ID, task.ProjectPath)
+		_ = s.config.StateManager.RemoveTask(task.ID, task.ProjectPath)
 	}
 }
 

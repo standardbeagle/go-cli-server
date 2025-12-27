@@ -315,7 +315,7 @@ func (pm *ProcessManager) RunSync(ctx context.Context, cfg ProcessConfig) (int, 
 	case <-proc.done:
 		return proc.ExitCode(), nil
 	case <-ctx.Done():
-		pm.StopProcess(ctx, proc)
+		_ = pm.StopProcess(ctx, proc) // Best-effort cleanup on context cancellation
 		return -1, ctx.Err()
 	}
 }
