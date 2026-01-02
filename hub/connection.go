@@ -108,7 +108,7 @@ func (c *Connection) handleCommand(ctx context.Context, cmd *protocol.Command) e
 func (c *Connection) handleInfo() error {
 	info := map[string]any{
 		"version":      c.hub.config.Version,
-		"uptime":       time.Since(c.hub.startTime).String(),
+		"uptime":       time.Since(c.hub.startTime),
 		"client_count": c.hub.clientCount.Load(),
 	}
 

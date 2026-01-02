@@ -308,6 +308,20 @@ func (h *Hub) SetSessionCleanup(fn func(sessionCode string)) {
 	h.sessionCleanup = fn
 }
 
+// RegisterSession registers a session with the Hub.
+// This allows external code to register sessions that will be cleaned up automatically
+// when the connection closes. The session will be associated with the projectPath,
+// and all processes in that path will be stopped on cleanup.
+func (h *Hub) RegisterSession(code, projectPath string) {
+	session := &Session{
+		Code:        code,
+		ProjectPath: projectPath,
+		StartedAt:   time.Now(),
+		LastSeen:    time.Now(),
+	}
+	h.sessions.Store(code, session)
+}
+
 // ClientCount returns the number of connected clients.
 func (h *Hub) ClientCount() int64 {
 	return h.clientCount.Load()
