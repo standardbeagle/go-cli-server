@@ -132,9 +132,9 @@ func TestScheduler_List(t *testing.T) {
 	defer s.Stop()
 
 	// Schedule tasks for different projects
-	s.Schedule("session-1", 1*time.Hour, "msg1", "/project-a")
-	s.Schedule("session-2", 1*time.Hour, "msg2", "/project-a")
-	s.Schedule("session-3", 1*time.Hour, "msg3", "/project-b")
+	_, _ = s.Schedule("session-1", 1*time.Hour, "msg1", "/project-a")
+	_, _ = s.Schedule("session-2", 1*time.Hour, "msg2", "/project-a")
+	_, _ = s.Schedule("session-3", 1*time.Hour, "msg3", "/project-b")
 
 	// List all
 	all := s.List("", true)

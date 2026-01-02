@@ -57,6 +57,56 @@ type StructuredError struct {
 	ValidParams  []string  `json:"valid_params,omitempty"`
 }
 
+// Error builders - centralize structured error construction to reduce shotgun surgery
+
+// NewMissingParamError creates a structured error for missing required parameters.
+func NewMissingParamError(command, param, message string) *StructuredError {
+	if message == "" {
+		message = fmt.Sprintf("missing required parameter: %s", param)
+	}
+	return &StructuredError{
+		Code:    ErrMissingParam,
+		Message: message,
+		Command: command,
+		Param:   param,
+	}
+}
+
+// NewInvalidActionError creates a structured error for invalid actions.
+func NewInvalidActionError(command, action string, validActions []string) *StructuredError {
+	return &StructuredError{
+		Code:         ErrInvalidAction,
+		Message:      fmt.Sprintf("invalid action: %s", action),
+		Command:      command,
+		Action:       action,
+		ValidActions: validActions,
+	}
+}
+
+// NewInternalError creates a structured error for internal errors.
+func NewInternalError(message string) *StructuredError {
+	return &StructuredError{
+		Code:    ErrInternal,
+		Message: message,
+	}
+}
+
+// NewNotFoundError creates a structured error for not found resources.
+func NewNotFoundError(resource, id string) *StructuredError {
+	return &StructuredError{
+		Code:    ErrNotFound,
+		Message: fmt.Sprintf("%s not found: %s", resource, id),
+	}
+}
+
+// NewInvalidArgsError creates a structured error for invalid arguments.
+func NewInvalidArgsError(message string) *StructuredError {
+	return &StructuredError{
+		Code:    ErrInvalidArgs,
+		Message: message,
+	}
+}
+
 // FormatOK formats a simple OK response.
 // Format: OK [message];;
 func FormatOK(message string) []byte {

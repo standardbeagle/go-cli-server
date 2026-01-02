@@ -320,7 +320,7 @@ func (sp *Subprocess) SendCommand(ctx context.Context, cmd *Command) (*Response,
 
 	// Set write deadline
 	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetWriteDeadline(deadline)
+		_ = conn.SetWriteDeadline(deadline)
 	}
 
 	if _, err := conn.Write(cmdBytes); err != nil {
@@ -330,7 +330,7 @@ func (sp *Subprocess) SendCommand(ctx context.Context, cmd *Command) (*Response,
 
 	// Read response
 	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetReadDeadline(deadline)
+		_ = conn.SetReadDeadline(deadline)
 	}
 
 	resp, err := ReadResponse(conn)

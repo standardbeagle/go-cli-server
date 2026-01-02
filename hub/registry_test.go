@@ -43,11 +43,11 @@ func TestCommandRegistryMultipleCommands(t *testing.T) {
 		return nil
 	}
 
-	reg.Register(CommandDefinition{
+	_ = reg.Register(CommandDefinition{
 		Verb:    "CMD1",
 		Handler: handler1,
 	})
-	reg.Register(CommandDefinition{
+	_ = reg.Register(CommandDefinition{
 		Verb:    "CMD2",
 		Handler: handler2,
 	})
@@ -109,7 +109,7 @@ func TestCommandRegistryValidSubVerbs(t *testing.T) {
 		return nil
 	}
 
-	reg.Register(CommandDefinition{
+	_ = reg.Register(CommandDefinition{
 		Verb:     "PROC",
 		SubVerbs: []string{"STATUS", "OUTPUT", "LIST"},
 		Handler:  handler,
@@ -138,7 +138,7 @@ func TestCommandRegistryRegisterSubHandler(t *testing.T) {
 	}
 
 	// Register main verb
-	reg.Register(CommandDefinition{
+	_ = reg.Register(CommandDefinition{
 		Verb:    "TEST",
 		Handler: mainHandler,
 	})
@@ -168,7 +168,7 @@ func TestCommandRegistryHasVerb(t *testing.T) {
 		t.Error("should not have TEST before registration")
 	}
 
-	reg.Register(CommandDefinition{
+	_ = reg.Register(CommandDefinition{
 		Verb:    "TEST",
 		Handler: handler,
 	})

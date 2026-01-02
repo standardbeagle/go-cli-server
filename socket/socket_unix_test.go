@@ -562,7 +562,7 @@ func TestConcurrentConnections(t *testing.T) {
 				defer wg.Done()
 				defer c.Close()
 				buf := make([]byte, 10)
-				c.Read(buf)
+				_, _ = c.Read(buf)
 			}(conn)
 		}
 	}()
@@ -581,8 +581,8 @@ func TestConcurrentConnections(t *testing.T) {
 				errors <- err
 				return
 			}
-			conn.Write([]byte("test"))
-			conn.Close()
+			_, _ = conn.Write([]byte("test"))
+				_ = conn.Close()
 		}()
 	}
 

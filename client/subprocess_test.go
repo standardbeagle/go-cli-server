@@ -67,7 +67,7 @@ func TestSubprocessServer_HandleCommand(t *testing.T) {
 	if err := server.Start(); err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
-	defer server.Stop(context.Background())
+	defer func() { _ = server.Stop(context.Background()) }()
 
 	// Connect as client
 	conn, err := net.Dial("unix", sockPath)
@@ -132,7 +132,7 @@ func TestSubprocessServer_UnknownCommand(t *testing.T) {
 	if err := server.Start(); err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
-	defer server.Stop(context.Background())
+	defer func() { _ = server.Stop(context.Background()) }()
 
 	// Connect as client
 	conn, err := net.Dial("unix", sockPath)
@@ -147,7 +147,7 @@ func TestSubprocessServer_UnknownCommand(t *testing.T) {
 	// Send unknown command (need to register it with the parser first)
 	// For this test, we'll use a raw write
 	rawCmd := "UNKNOWN;;"
-	conn.Write([]byte(rawCmd))
+	_, _ = conn.Write([]byte(rawCmd))
 
 	resp, err := parser.ParseResponse()
 	if err != nil {
@@ -171,7 +171,7 @@ func TestSubprocessServer_TCPTransport(t *testing.T) {
 	if err := server.Start(); err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
-	defer server.Stop(context.Background())
+	defer func() { _ = server.Stop(context.Background()) }()
 
 	addr := server.Address()
 	if addr == "" {
@@ -227,7 +227,7 @@ func TestSubprocessServer_Callbacks(t *testing.T) {
 	if err := server.Start(); err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
-	defer server.Stop(context.Background())
+	defer func() { _ = server.Stop(context.Background()) }()
 
 	// Connect
 	conn, err := net.Dial("unix", sockPath)

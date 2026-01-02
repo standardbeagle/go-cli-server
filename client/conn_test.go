@@ -207,13 +207,13 @@ func handleMockConnection(conn net.Conn) {
 
 		switch cmd.Verb {
 		case "PING":
-			writer.WritePong()
+			_ = writer.WritePong()
 		case "INFO":
 			data, _ := json.Marshal(map[string]interface{}{
 				"version": "1.0.0",
 				"uptime":  100,
 			})
-			writer.WriteJSON(data)
+			_ = writer.WriteJSON(data)
 		case "TEST":
 			// Handle TEST command - args[0] is the sub-verb since WriteCommandWithSubVerb
 			// puts subVerb as first arg if it's empty string
@@ -227,30 +227,30 @@ func handleMockConnection(conn net.Conn) {
 
 			switch subVerb {
 			case "OK":
-				writer.WriteOK("success")
+				_ = writer.WriteOK("success")
 			case "ERROR":
-				writer.WriteErr(protocol.ErrInvalidAction, "test error")
+				_ = writer.WriteErr(protocol.ErrInvalidAction, "test error")
 			case "JSON":
 				data, _ := json.Marshal(map[string]interface{}{
 					"key":    "value",
 					"number": 42,
 				})
-				writer.WriteJSON(data)
+				_ = writer.WriteJSON(data)
 			case "CHUNKED":
-				writer.WriteChunk([]byte("chunk1"))
-				writer.WriteChunk([]byte("chunk2"))
-				writer.WriteEnd()
+				_ = writer.WriteChunk([]byte("chunk1"))
+				_ = writer.WriteChunk([]byte("chunk2"))
+				_ = writer.WriteEnd()
 			case "ECHO":
 				if len(cmd.Data) > 0 {
-					writer.WriteJSON(cmd.Data)
+					_ = writer.WriteJSON(cmd.Data)
 				} else {
-					writer.WriteJSON([]byte("{}"))
+					_ = writer.WriteJSON([]byte("{}"))
 				}
 			default:
-				writer.WriteOK("handled")
+				_ = writer.WriteOK("handled")
 			}
 		default:
-			writer.WriteErr(protocol.ErrInvalidCommand, "unknown command")
+			_ = writer.WriteErr(protocol.ErrInvalidCommand, "unknown command")
 		}
 	}
 }
@@ -381,7 +381,7 @@ func TestRequestBuilder(t *testing.T) {
 			t.Errorf("WithJSON().Bytes() error = %v", err)
 		}
 		var result map[string]string
-		json.Unmarshal(data, &result)
+		_ = json.Unmarshal(data, &result)
 		if result["key"] != "value" {
 			t.Errorf("Echo result = %v, want key=value", result)
 		}
@@ -518,7 +518,7 @@ func TestRequestBuilderChaining(t *testing.T) {
 	if rb4 != rb {
 		t.Error("WithJSON should return same builder")
 	}
-	if rb.data == nil || len(rb.data) == 0 {
+	if len(rb.data) == 0 {
 		t.Error("WithJSON should set data")
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -57,7 +56,7 @@ func (c *Connection) Handle(ctx context.Context) {
 
 		// Set read deadline if configured
 		if c.hub.config.ReadTimeout > 0 {
-			c.conn.SetReadDeadline(time.Now().Add(c.hub.config.ReadTimeout))
+			_ = c.conn.SetReadDeadline(time.Now().Add(c.hub.config.ReadTimeout))
 		}
 
 		// Parse next command
@@ -73,7 +72,7 @@ func (c *Connection) Handle(ctx context.Context) {
 				return
 			}
 			// Try to send error response
-			c.WriteErr(protocol.ErrInvalidCommand, err.Error())
+			_ = c.WriteErr(protocol.ErrInvalidCommand, err.Error())
 			// Try to resync
 			if syncErr := c.parser.Resync(); syncErr != nil {
 				return
@@ -82,9 +81,7 @@ func (c *Connection) Handle(ctx context.Context) {
 		}
 
 		// Dispatch command
-		if err := c.handleCommand(ctx, cmd); err != nil {
-			// Error was already sent to client
-		}
+		_ = c.handleCommand(ctx, cmd) // Error was already sent to client
 	}
 }
 
@@ -126,8 +123,8 @@ func (c *Connection) handleInfo() error {
 
 // handleShutdown initiates hub shutdown.
 func (c *Connection) handleShutdown() error {
-	c.WriteOK("shutting down")
-	go c.hub.Stop(context.Background())
+	_ = c.WriteOK("shutting down")
+	go func() { _ = c.hub.Stop(context.Background()) }()
 	return nil
 }
 
@@ -182,7 +179,7 @@ func (c *Connection) WriteOK(msg string) error {
 	defer c.mu.Unlock()
 
 	if c.hub.config.WriteTimeout > 0 {
-		c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
+		_ = c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
 	}
 	return c.writer.WriteOK(msg)
 }
@@ -193,7 +190,7 @@ func (c *Connection) WriteErr(code protocol.ErrorCode, msg string) error {
 	defer c.mu.Unlock()
 
 	if c.hub.config.WriteTimeout > 0 {
-		c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
+		_ = c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
 	}
 	return c.writer.WriteErr(code, msg)
 }
@@ -207,13 +204,35 @@ func (c *Connection) WriteStructuredErr(err *protocol.StructuredError) error {
 	return c.WriteJSON(data)
 }
 
+// Convenience error methods - reduce shotgun surgery by centralizing common error patterns
+
+// WriteMissingParam sends a missing parameter error.
+func (c *Connection) WriteMissingParam(command, param, message string) error {
+	return c.WriteStructuredErr(protocol.NewMissingParamError(command, param, message))
+}
+
+// WriteInvalidAction sends an invalid action error.
+func (c *Connection) WriteInvalidAction(command, action string, validActions []string) error {
+	return c.WriteStructuredErr(protocol.NewInvalidActionError(command, action, validActions))
+}
+
+// WriteInternalErr sends an internal error.
+func (c *Connection) WriteInternalErr(message string) error {
+	return c.WriteStructuredErr(protocol.NewInternalError(message))
+}
+
+// WriteNotFound sends a not found error.
+func (c *Connection) WriteNotFound(resource, id string) error {
+	return c.WriteStructuredErr(protocol.NewNotFoundError(resource, id))
+}
+
 // WriteJSON sends a JSON response.
 func (c *Connection) WriteJSON(data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.hub.config.WriteTimeout > 0 {
-		c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
+		_ = c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
 	}
 	return c.writer.WriteJSON(data)
 }
@@ -224,7 +243,7 @@ func (c *Connection) WriteData(data []byte) error {
 	defer c.mu.Unlock()
 
 	if c.hub.config.WriteTimeout > 0 {
-		c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
+		_ = c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
 	}
 	return c.writer.WriteData(data)
 }
@@ -235,7 +254,7 @@ func (c *Connection) WriteChunk(data []byte) error {
 	defer c.mu.Unlock()
 
 	if c.hub.config.WriteTimeout > 0 {
-		c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
+		_ = c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
 	}
 	return c.writer.WriteChunk(data)
 }
@@ -246,7 +265,7 @@ func (c *Connection) WriteEnd() error {
 	defer c.mu.Unlock()
 
 	if c.hub.config.WriteTimeout > 0 {
-		c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
+		_ = c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
 	}
 	return c.writer.WriteEnd()
 }
@@ -257,7 +276,7 @@ func (c *Connection) WritePong() error {
 	defer c.mu.Unlock()
 
 	if c.hub.config.WriteTimeout > 0 {
-		c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
+		_ = c.conn.SetWriteDeadline(time.Now().Add(c.hub.config.WriteTimeout))
 	}
 	return c.writer.WritePong()
 }
@@ -270,12 +289,4 @@ func isTimeoutError(err error) bool {
 	}
 	netErr, ok := err.(net.Error)
 	return ok && netErr.Timeout()
-}
-
-func isClosedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	return err == net.ErrClosed ||
-		strings.Contains(err.Error(), "use of closed network connection")
 }

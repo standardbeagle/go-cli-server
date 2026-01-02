@@ -62,10 +62,8 @@ func (pm *ProcessManager) Start(ctx context.Context, proc *ManagedProcess) error
 		return fmt.Errorf("failed to start process %s: %w", proc.ID, err)
 	}
 
-	// Setup platform-specific process group management
-	if err := SetupJobObject(proc.cmd); err != nil {
-		// Non-fatal
-	}
+	// Setup platform-specific process group management (non-fatal if it fails)
+	_ = SetupJobObject(proc.cmd)
 
 	// Record start time and PID
 	now := time.Now()

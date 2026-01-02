@@ -32,7 +32,7 @@ func TestIntegration_SubprocessRegistration(t *testing.T) {
 	if err := h.Start(); err != nil {
 		t.Fatalf("Failed to start hub: %v", err)
 	}
-	defer h.Stop(context.Background())
+	defer func() { _ = h.Stop(context.Background()) }()
 
 	// Give hub time to be ready
 	time.Sleep(50 * time.Millisecond)
@@ -64,7 +64,7 @@ func TestIntegration_SubprocessRegistration(t *testing.T) {
 	if err := subServer.Start(); err != nil {
 		t.Fatalf("Failed to start subprocess server: %v", err)
 	}
-	defer subServer.Stop(context.Background())
+	defer func() { _ = subServer.Stop(context.Background()) }()
 
 	// Register subprocess with hub
 	regConfig := protocol.SubprocessRegisterConfig{
@@ -151,7 +151,7 @@ func TestIntegration_SubprocessHealthCheck(t *testing.T) {
 	if err := h.Start(); err != nil {
 		t.Fatalf("Failed to start hub: %v", err)
 	}
-	defer h.Stop(context.Background())
+	defer func() { _ = h.Stop(context.Background()) }()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -171,7 +171,7 @@ func TestIntegration_SubprocessHealthCheck(t *testing.T) {
 	if err := subServer.Start(); err != nil {
 		t.Fatalf("Failed to start subprocess: %v", err)
 	}
-	defer subServer.Stop(context.Background())
+	defer func() { _ = subServer.Stop(context.Background()) }()
 
 	// Register with health check enabled
 	regConfig := protocol.SubprocessRegisterConfig{
@@ -243,7 +243,7 @@ func TestIntegration_MultipleSubprocesses(t *testing.T) {
 	if err := h.Start(); err != nil {
 		t.Fatalf("Failed to start hub: %v", err)
 	}
-	defer h.Stop(context.Background())
+	defer func() { _ = h.Stop(context.Background()) }()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -267,7 +267,7 @@ func TestIntegration_MultipleSubprocesses(t *testing.T) {
 		if err := subServers[i].Start(); err != nil {
 			t.Fatalf("Failed to start subprocess %d: %v", i, err)
 		}
-		defer subServers[i].Stop(context.Background())
+		defer func(idx int) { _ = subServers[idx].Stop(context.Background()) }(i)
 
 		// Register with hub
 		regConfig := protocol.SubprocessRegisterConfig{

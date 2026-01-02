@@ -204,8 +204,8 @@ func TestProcessOutputBuffers(t *testing.T) {
 	proc := NewManagedProcess(cfg)
 
 	// Write directly to stdout buffer for testing
-	proc.stdout.Write([]byte("stdout content\n"))
-	proc.stderr.Write([]byte("stderr content\n"))
+	_, _ = proc.stdout.Write([]byte("stdout content\n"))
+	_, _ = proc.stderr.Write([]byte("stderr content\n"))
 
 	stdout, _ := proc.Stdout()
 	if string(stdout) != "stdout content\n" {

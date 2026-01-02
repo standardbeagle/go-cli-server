@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/process"
-	"github.com/standardbeagle/go-cli-server/protocol"
 	"github.com/standardbeagle/go-cli-server/socket"
 )
 
@@ -127,43 +126,43 @@ func New(config Config) *Hub {
 func (h *Hub) registerBuiltinCommands() {
 	// PROC command (if ProcessManager enabled)
 	if h.pm != nil {
-		h.commands.Register(CommandDefinition{
+		_ = h.commands.Register(CommandDefinition{
 			Verb:     "PROC",
 			SubVerbs: []string{"STATUS", "OUTPUT", "STOP", "LIST", "CLEANUP-PORT", "STDIN", "STREAM"},
 			Handler:  h.handleProc,
 		})
 
-		h.commands.Register(CommandDefinition{
+		_ = h.commands.Register(CommandDefinition{
 			Verb:    "RUN",
 			Handler: h.handleRun,
 		})
 
-		h.commands.Register(CommandDefinition{
+		_ = h.commands.Register(CommandDefinition{
 			Verb:    "RUN-JSON",
 			Handler: h.handleRun,
 		})
 	}
 
 	// RELAY command for message relay
-	h.commands.Register(CommandDefinition{
+	_ = h.commands.Register(CommandDefinition{
 		Verb:     "RELAY",
 		SubVerbs: []string{"SEND", "BROADCAST", "REQUEST"},
 		Handler:  h.handleRelay,
 	})
 
 	// ATTACH/DETACH for external processes
-	h.commands.Register(CommandDefinition{
+	_ = h.commands.Register(CommandDefinition{
 		Verb:    "ATTACH",
 		Handler: h.handleAttach,
 	})
 
-	h.commands.Register(CommandDefinition{
+	_ = h.commands.Register(CommandDefinition{
 		Verb:    "DETACH",
 		Handler: h.handleDetach,
 	})
 
 	// SESSION command
-	h.commands.Register(CommandDefinition{
+	_ = h.commands.Register(CommandDefinition{
 		Verb:     "SESSION",
 		SubVerbs: []string{"REGISTER", "UNREGISTER", "HEARTBEAT", "LIST", "GET"},
 		Handler:  h.handleSession,
@@ -219,7 +218,7 @@ func (h *Hub) Stop(ctx context.Context) error {
 
 	// Shutdown ProcessManager if enabled
 	if h.pm != nil {
-		h.pm.Shutdown(ctx)
+		_ = h.pm.Shutdown(ctx)
 	}
 
 	// Wait for goroutines with timeout
@@ -296,7 +295,7 @@ func (h *Hub) cleanupSession(sessionCode string) {
 	if h.pm != nil {
 		if session, ok := h.sessions.Load(sessionCode); ok {
 			s := session.(*Session)
-			h.pm.StopByProjectPath(context.Background(), s.ProjectPath)
+			_, _ = h.pm.StopByProjectPath(context.Background(), s.ProjectPath)
 		}
 	}
 
@@ -354,12 +353,6 @@ type ExternalProcess struct {
 	Connection  net.Conn
 	Labels      map[string]string
 	Inbox       chan *Message
-
-	parser *protocol.Parser
-	writer *protocol.Writer
-
-	mu     sync.RWMutex
-	closed atomic.Bool
 }
 
 // Message represents a message for relay between processes.

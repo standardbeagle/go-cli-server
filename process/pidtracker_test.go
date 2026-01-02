@@ -152,9 +152,9 @@ func TestFilePIDTracker_ListTracked(t *testing.T) {
 	})
 
 	// Add multiple processes
-	tracker.Add("proc-1", 1001, 1001, "/project-a")
-	tracker.Add("proc-2", 1002, 1002, "/project-a")
-	tracker.Add("proc-3", 1003, 1003, "/project-b")
+	_ = tracker.Add("proc-1", 1001, 1001, "/project-a")
+	_ = tracker.Add("proc-2", 1002, 1002, "/project-a")
+	_ = tracker.Add("proc-3", 1003, 1003, "/project-b")
 
 	tracked := tracker.ListTracked()
 	if len(tracked) != 3 {

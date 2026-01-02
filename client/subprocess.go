@@ -431,15 +431,15 @@ func (s *SubprocessStdioServer) handleCommand(cmd *protocol.Command) *protocol.R
 func writeStdioResponse(writer *protocol.Writer, resp *protocol.Response) {
 	switch resp.Type {
 	case protocol.ResponseOK:
-		writer.WriteOK(resp.Message)
+		_ = writer.WriteOK(resp.Message)
 	case protocol.ResponseErr:
-		writer.WriteErr(protocol.ErrorCode(resp.Code), resp.Message)
+		_ = writer.WriteErr(protocol.ErrorCode(resp.Code), resp.Message)
 	case protocol.ResponsePong:
-		writer.WritePong()
+		_ = writer.WritePong()
 	case protocol.ResponseJSON:
-		writer.WriteJSON(resp.Data)
+		_ = writer.WriteJSON(resp.Data)
 	case protocol.ResponseData:
-		writer.WriteData(resp.Data)
+		_ = writer.WriteData(resp.Data)
 	}
 }
 
@@ -502,7 +502,7 @@ func StartWithHub(hubSocket string, regConfig protocol.SubprocessRegisterConfig,
 
 	// Register with hub
 	if err := RegisterWithHub(hubSocket, regConfig); err != nil {
-		server.Stop(context.Background())
+		_ = server.Stop(context.Background())
 		return nil, fmt.Errorf("failed to register: %w", err)
 	}
 

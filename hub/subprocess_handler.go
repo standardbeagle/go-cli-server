@@ -11,7 +11,7 @@ import (
 
 // RegisterSubprocessCommands registers the SUBPROCESS command handlers with the hub.
 func (r *SubprocessRouter) RegisterSubprocessCommands() {
-	r.hub.RegisterCommand(CommandDefinition{
+	_ = r.hub.RegisterCommand(CommandDefinition{
 		Verb:    protocol.VerbSubprocess,
 		Handler: r.handleSubprocess,
 	})
@@ -33,19 +33,13 @@ func (r *SubprocessRouter) handleSubprocess(ctx context.Context, conn *Connectio
 	case protocol.SubVerbList:
 		return r.handleList(ctx, conn, cmd)
 	default:
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:    protocol.ErrInvalidAction,
-			Message: fmt.Sprintf("unknown SUBPROCESS action: %s", cmd.SubVerb),
-			Command: "SUBPROCESS",
-			Action:  cmd.SubVerb,
-			ValidActions: []string{
-				protocol.SubVerbRegister,
-				protocol.SubVerbUnregister,
-				protocol.SubVerbStart,
-				protocol.SubVerbStop,
-				protocol.SubVerbStatus,
-				protocol.SubVerbList,
-			},
+		return conn.WriteInvalidAction("SUBPROCESS", cmd.SubVerb, []string{
+			protocol.SubVerbRegister,
+			protocol.SubVerbUnregister,
+			protocol.SubVerbStart,
+			protocol.SubVerbStop,
+			protocol.SubVerbStatus,
+			protocol.SubVerbList,
 		})
 	}
 }
@@ -54,12 +48,7 @@ func (r *SubprocessRouter) handleSubprocess(ctx context.Context, conn *Connectio
 // Expects JSON data with SubprocessRegisterConfig.
 func (r *SubprocessRouter) handleRegister(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Data) == 0 {
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:    protocol.ErrMissingParam,
-			Message: "SUBPROCESS REGISTER requires JSON configuration data",
-			Command: "SUBPROCESS REGISTER",
-			Param:   "data",
-		})
+		return conn.WriteMissingParam("SUBPROCESS REGISTER", "data", "SUBPROCESS REGISTER requires JSON configuration data")
 	}
 
 	var config protocol.SubprocessRegisterConfig
@@ -69,30 +58,15 @@ func (r *SubprocessRouter) handleRegister(ctx context.Context, conn *Connection,
 
 	// Validate required fields
 	if config.ID == "" {
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:    protocol.ErrMissingParam,
-			Message: "subprocess ID is required",
-			Command: "SUBPROCESS REGISTER",
-			Param:   "id",
-		})
+		return conn.WriteMissingParam("SUBPROCESS REGISTER", "id", "subprocess ID is required")
 	}
 
 	if len(config.Commands) == 0 {
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:    protocol.ErrMissingParam,
-			Message: "at least one command pattern is required",
-			Command: "SUBPROCESS REGISTER",
-			Param:   "commands",
-		})
+		return conn.WriteMissingParam("SUBPROCESS REGISTER", "commands", "at least one command pattern is required")
 	}
 
 	if config.Transport.Type == "" {
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:    protocol.ErrMissingParam,
-			Message: "transport type is required",
-			Command: "SUBPROCESS REGISTER",
-			Param:   "transport.type",
-		})
+		return conn.WriteMissingParam("SUBPROCESS REGISTER", "transport.type", "transport type is required")
 	}
 
 	// Convert protocol config to internal ManagedSubprocess
@@ -107,7 +81,7 @@ func (r *SubprocessRouter) handleRegister(ctx context.Context, conn *Connection,
 	if config.AutoStart {
 		if err := sp.start(ctx); err != nil {
 			// Registration succeeded but start failed - report but don't unregister
-			return conn.WriteErr(protocol.ErrInternal, fmt.Sprintf("registered but failed to start: %v", err))
+			return conn.WriteInternalErr(fmt.Sprintf("registered but failed to start: %v", err))
 		}
 	}
 
@@ -120,12 +94,7 @@ func (r *SubprocessRouter) handleRegister(ctx context.Context, conn *Connection,
 // handleUnregister handles SUBPROCESS UNREGISTER command.
 func (r *SubprocessRouter) handleUnregister(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Args) == 0 {
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:    protocol.ErrMissingParam,
-			Message: "subprocess ID is required",
-			Command: "SUBPROCESS UNREGISTER",
-			Param:   "id",
-		})
+		return conn.WriteMissingParam("SUBPROCESS UNREGISTER", "id", "subprocess ID is required")
 	}
 
 	id := cmd.Args[0]
@@ -139,17 +108,12 @@ func (r *SubprocessRouter) handleUnregister(ctx context.Context, conn *Connectio
 // handleStart handles SUBPROCESS START command.
 func (r *SubprocessRouter) handleStart(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Args) == 0 {
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:    protocol.ErrMissingParam,
-			Message: "subprocess ID is required",
-			Command: "SUBPROCESS START",
-			Param:   "id",
-		})
+		return conn.WriteMissingParam("SUBPROCESS START", "id", "subprocess ID is required")
 	}
 
 	id := cmd.Args[0]
 	if err := r.Start(ctx, id); err != nil {
-		return conn.WriteErr(protocol.ErrInternal, err.Error())
+		return conn.WriteInternalErr(err.Error())
 	}
 
 	// Return updated subprocess info
@@ -166,17 +130,12 @@ func (r *SubprocessRouter) handleStart(ctx context.Context, conn *Connection, cm
 // handleStop handles SUBPROCESS STOP command.
 func (r *SubprocessRouter) handleStop(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Args) == 0 {
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:    protocol.ErrMissingParam,
-			Message: "subprocess ID is required",
-			Command: "SUBPROCESS STOP",
-			Param:   "id",
-		})
+		return conn.WriteMissingParam("SUBPROCESS STOP", "id", "subprocess ID is required")
 	}
 
 	id := cmd.Args[0]
 	if err := r.Stop(ctx, id); err != nil {
-		return conn.WriteErr(protocol.ErrInternal, err.Error())
+		return conn.WriteInternalErr(err.Error())
 	}
 
 	return conn.WriteOK(fmt.Sprintf("subprocess %s stopped", id))
@@ -185,18 +144,13 @@ func (r *SubprocessRouter) handleStop(ctx context.Context, conn *Connection, cmd
 // handleStatus handles SUBPROCESS STATUS command.
 func (r *SubprocessRouter) handleStatus(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Args) == 0 {
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:    protocol.ErrMissingParam,
-			Message: "subprocess ID is required",
-			Command: "SUBPROCESS STATUS",
-			Param:   "id",
-		})
+		return conn.WriteMissingParam("SUBPROCESS STATUS", "id", "subprocess ID is required")
 	}
 
 	id := cmd.Args[0]
 	sp, ok := r.Get(id)
 	if !ok {
-		return conn.WriteErr(protocol.ErrNotFound, fmt.Sprintf("subprocess %s not found", id))
+		return conn.WriteNotFound("subprocess", id)
 	}
 
 	info := r.subprocessToInfo(sp)

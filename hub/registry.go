@@ -98,12 +98,7 @@ func (r *CommandRegistry) Dispatch(ctx context.Context, conn *Connection, cmd *p
 
 	val, ok := r.handlers.Load(verb)
 	if !ok {
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:         protocol.ErrInvalidCommand,
-			Message:      "unknown command",
-			Command:      cmd.Verb,
-			ValidActions: r.validVerbs(),
-		})
+		return conn.WriteInvalidAction("", cmd.Verb, r.validVerbs())
 	}
 
 	vh := val.(*verbHandler)

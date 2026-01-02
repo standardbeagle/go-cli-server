@@ -81,7 +81,7 @@ func TestSubprocessHandler_Register(t *testing.T) {
 		}
 
 		// Cleanup
-		router.Unregister("test-sp")
+		_ = router.Unregister("test-sp")
 	})
 
 	t.Run("missing data", func(t *testing.T) {
@@ -183,7 +183,7 @@ func TestSubprocessHandler_Register(t *testing.T) {
 		// First registration
 		conn1, _ := mockConnection(hub)
 		defer conn1.conn.Close()
-		router.handleSubprocess(ctx, conn1, cmd)
+		_ = router.handleSubprocess(ctx, conn1, cmd)
 
 		// Second registration should fail
 		conn2, output := mockConnection(hub)
@@ -198,7 +198,7 @@ func TestSubprocessHandler_Register(t *testing.T) {
 		}
 
 		// Cleanup
-		router.Unregister("dup-test")
+		_ = router.Unregister("dup-test")
 	})
 }
 
@@ -217,7 +217,7 @@ func TestSubprocessHandler_Unregister(t *testing.T) {
 	}
 	sp.state.Store(SubprocessPending)
 	sp.ctx, sp.cancel = context.WithCancel(context.Background())
-	router.Register(sp)
+	_ = router.Register(sp)
 
 	t.Run("successful unregister", func(t *testing.T) {
 		cmd := &protocol.Command{
@@ -301,7 +301,7 @@ func TestSubprocessHandler_List(t *testing.T) {
 		}
 		sp.state.Store(SubprocessPending)
 		sp.ctx, sp.cancel = context.WithCancel(context.Background())
-		router.Register(sp)
+		_ = router.Register(sp)
 	}
 
 	cmd := &protocol.Command{
@@ -345,7 +345,7 @@ func TestSubprocessHandler_Status(t *testing.T) {
 	sp.state.Store(SubprocessRunning)
 	sp.healthy.Store(true)
 	sp.ctx, sp.cancel = context.WithCancel(context.Background())
-	router.Register(sp)
+	_ = router.Register(sp)
 
 	t.Run("get status", func(t *testing.T) {
 		cmd := &protocol.Command{

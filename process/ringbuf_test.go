@@ -43,8 +43,8 @@ func TestRingBufferWrap(t *testing.T) {
 	rb := NewRingBuffer(10)
 
 	// Write more than buffer capacity
-	rb.Write([]byte("12345"))     // 5 bytes
-	rb.Write([]byte("67890abc"))  // 8 more = 13 total, wraps
+	_, _ = rb.Write([]byte("12345"))    // 5 bytes
+	_, _ = rb.Write([]byte("67890abc")) // 8 more = 13 total, wraps
 
 	data, truncated := rb.Snapshot()
 	if !truncated {
@@ -71,7 +71,7 @@ func TestRingBufferLen(t *testing.T) {
 		t.Errorf("Len() = %d, want 0 initially", rb.Len())
 	}
 
-	rb.Write([]byte("hello"))
+	_, _ = rb.Write([]byte("hello"))
 	if rb.Len() != 5 {
 		t.Errorf("Len() = %d, want 5", rb.Len())
 	}
@@ -90,7 +90,7 @@ func TestRingBufferConcurrentWrites(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < writesPerWriter; j++ {
 				msg := []byte(strings.Repeat("x", 50))
-				rb.Write(msg)
+				_, _ = rb.Write(msg)
 			}
 		}(i)
 	}
@@ -124,7 +124,7 @@ func TestRingBufferLargeWrite(t *testing.T) {
 
 	// Write exactly buffer size
 	data := bytes.Repeat([]byte("A"), size)
-	rb.Write(data)
+	_, _ = rb.Write(data)
 
 	result, truncated := rb.Snapshot()
 	if len(result) != size {
@@ -136,8 +136,8 @@ func TestRingBufferLargeWrite(t *testing.T) {
 	}
 
 	// Now write one more byte to trigger truncation
-	rb.Write([]byte("B"))
-	result, truncated = rb.Snapshot()
+	_, _ = rb.Write([]byte("B"))
+	_, truncated = rb.Snapshot()
 	if !truncated {
 		t.Error("expected truncated = true after overflow")
 	}
@@ -146,7 +146,7 @@ func TestRingBufferLargeWrite(t *testing.T) {
 func TestRingBufferReset(t *testing.T) {
 	rb := NewRingBuffer(100)
 
-	rb.Write([]byte("test data"))
+	_, _ = rb.Write([]byte("test data"))
 	if rb.Len() == 0 {
 		t.Error("expected non-empty buffer after write")
 	}
@@ -172,12 +172,12 @@ func TestRingBufferTruncated(t *testing.T) {
 		t.Error("expected Truncated() = false initially")
 	}
 
-	rb.Write([]byte("12345"))
+	_, _ = rb.Write([]byte("12345"))
 	if rb.Truncated() {
 		t.Error("expected Truncated() = false before overflow")
 	}
 
-	rb.Write([]byte("67890abc"))
+	_, _ = rb.Write([]byte("67890abc"))
 	// Note: the overflowed flag is set on subsequent writes after capacity exceeded
 	// Use Snapshot which returns truncated=true when buffer has wrapped
 	_, truncated := rb.Snapshot()

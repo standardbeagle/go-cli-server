@@ -177,7 +177,7 @@ func NewSubprocessRouter(hub *Hub) *SubprocessRouter {
 	}
 
 	// Register a catch-all handler that routes to subprocesses
-	hub.RegisterCommand(CommandDefinition{
+	_ = hub.RegisterCommand(CommandDefinition{
 		Verb:    "*", // Special: matches any unhandled command
 		Handler: r.routeToSubprocess,
 	})
@@ -313,18 +313,14 @@ func (r *SubprocessRouter) routeToSubprocess(ctx context.Context, conn *Connecti
 
 	if subprocessID == "" {
 		r.totalFailed.Add(1)
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:    protocol.ErrInvalidCommand,
-			Message: "no subprocess handles this command",
-			Command: fullCmd,
-		})
+		return conn.WriteErr(protocol.ErrInvalidCommand, fmt.Sprintf("no subprocess handles command: %s", fullCmd))
 	}
 
 	// Get subprocess
 	sp, ok := r.Get(subprocessID)
 	if !ok {
 		r.totalFailed.Add(1)
-		return conn.WriteErr(protocol.ErrNotFound, fmt.Sprintf("subprocess %s not found", subprocessID))
+		return conn.WriteNotFound("subprocess", subprocessID)
 	}
 
 	// Check subprocess is running
@@ -353,7 +349,7 @@ func (r *SubprocessRouter) routeToSubprocess(ctx context.Context, conn *Connecti
 	if err != nil {
 		sp.commandsFailed.Add(1)
 		r.totalFailed.Add(1)
-		return conn.WriteErr(protocol.ErrInternal, fmt.Sprintf("failed to forward command: %v", err))
+		return conn.WriteInternalErr(fmt.Sprintf("failed to forward command: %v", err))
 	}
 
 	sp.commandsHandled.Add(1)
@@ -368,10 +364,7 @@ func (r *SubprocessRouter) relayResponse(conn *Connection, resp *protocol.Respon
 	case protocol.ResponseOK:
 		return conn.WriteOK(resp.Message)
 	case protocol.ResponseErr:
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:    protocol.ErrorCode(resp.Code),
-			Message: resp.Message,
-		})
+		return conn.WriteErr(protocol.ErrorCode(resp.Code), resp.Message)
 	case protocol.ResponseJSON:
 		return conn.WriteJSON(resp.Data)
 	case protocol.ResponseData:
@@ -379,7 +372,7 @@ func (r *SubprocessRouter) relayResponse(conn *Connection, resp *protocol.Respon
 	case protocol.ResponsePong:
 		return conn.WritePong()
 	default:
-		return conn.WriteErr(protocol.ErrInternal, fmt.Sprintf("unknown response type from subprocess: %s", resp.Type))
+		return conn.WriteInternalErr(fmt.Sprintf("unknown response type from subprocess: %s", resp.Type))
 	}
 }
 
@@ -706,7 +699,7 @@ func (sp *ManagedSubprocess) stop(ctx context.Context) error {
 	// Close connection if exists
 	sp.connMu.Lock()
 	if sp.conn != nil {
-		sp.conn.closer()
+		_ = sp.conn.closer()
 		sp.conn = nil
 	}
 	sp.connMu.Unlock()

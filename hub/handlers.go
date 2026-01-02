@@ -39,32 +39,20 @@ func (h *Hub) handleProc(ctx context.Context, conn *Connection, cmd *protocol.Co
 	case "STREAM":
 		return h.handleProcStream(conn, cmd)
 	case "":
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:         protocol.ErrMissingParam,
-			Message:      "action required",
-			Command:      "PROC",
-			Param:        "action",
-			ValidActions: []string{"STATUS", "OUTPUT", "STOP", "LIST", "CLEANUP-PORT", "STDIN", "STREAM"},
-		})
+		return conn.WriteMissingParam("PROC", "action", "action required")
 	default:
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:         protocol.ErrInvalidAction,
-			Message:      "unknown action",
-			Command:      "PROC",
-			Action:       cmd.SubVerb,
-			ValidActions: []string{"STATUS", "OUTPUT", "STOP", "LIST", "CLEANUP-PORT", "STDIN", "STREAM"},
-		})
+		return conn.WriteInvalidAction("PROC", cmd.SubVerb, []string{"STATUS", "OUTPUT", "STOP", "LIST", "CLEANUP-PORT", "STDIN", "STREAM"})
 	}
 }
 
 func (h *Hub) handleProcStatus(conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Args) == 0 {
-		return conn.WriteErr(protocol.ErrMissingParam, "process ID required")
+		return conn.WriteMissingParam("PROC STATUS", "id", "process ID required")
 	}
 
 	proc, err := h.pm.Get(cmd.Args[0])
 	if err != nil {
-		return conn.WriteErr(protocol.ErrNotFound, "process not found")
+		return conn.WriteNotFound("process", cmd.Args[0])
 	}
 
 	status := map[string]any{
@@ -90,12 +78,12 @@ func (h *Hub) handleProcStatus(conn *Connection, cmd *protocol.Command) error {
 
 func (h *Hub) handleProcOutput(conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Args) == 0 {
-		return conn.WriteErr(protocol.ErrMissingParam, "process ID required")
+		return conn.WriteMissingParam("PROC OUTPUT", "id", "process ID required")
 	}
 
 	proc, err := h.pm.Get(cmd.Args[0])
 	if err != nil {
-		return conn.WriteErr(protocol.ErrNotFound, "process not found")
+		return conn.WriteNotFound("process", cmd.Args[0])
 	}
 
 	output, truncated := proc.CombinedOutput()
@@ -125,7 +113,7 @@ func (h *Hub) handleProcOutput(conn *Connection, cmd *protocol.Command) error {
 
 func (h *Hub) handleProcStop(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Args) == 0 {
-		return conn.WriteErr(protocol.ErrMissingParam, "process ID required")
+		return conn.WriteMissingParam("PROC STOP", "id", "process ID required")
 	}
 
 	if err := h.pm.Stop(ctx, cmd.Args[0]); err != nil {
@@ -154,7 +142,7 @@ func (h *Hub) handleProcList(conn *Connection, cmd *protocol.Command) error {
 
 func (h *Hub) handleProcCleanupPort(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Args) == 0 {
-		return conn.WriteErr(protocol.ErrMissingParam, "port required")
+		return conn.WriteMissingParam("PROC CLEANUP-PORT", "port", "port required")
 	}
 
 	var port int
@@ -164,7 +152,7 @@ func (h *Hub) handleProcCleanupPort(ctx context.Context, conn *Connection, cmd *
 
 	pids, err := h.pm.KillProcessByPort(ctx, port)
 	if err != nil {
-		return conn.WriteErr(protocol.ErrInternal, err.Error())
+		return conn.WriteInternalErr(err.Error())
 	}
 
 	result := map[string]any{
@@ -178,10 +166,10 @@ func (h *Hub) handleProcCleanupPort(ctx context.Context, conn *Connection, cmd *
 
 func (h *Hub) handleProcStdin(conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Args) == 0 {
-		return conn.WriteErr(protocol.ErrMissingParam, "process ID required")
+		return conn.WriteMissingParam("PROC STDIN", "id", "process ID required")
 	}
 	if len(cmd.Data) == 0 {
-		return conn.WriteErr(protocol.ErrMissingParam, "data required")
+		return conn.WriteMissingParam("PROC STDIN", "data", "data required")
 	}
 
 	n, err := h.pm.WriteStdin(cmd.Args[0], cmd.Data)
@@ -198,7 +186,7 @@ func (h *Hub) handleProcStdin(conn *Connection, cmd *protocol.Command) error {
 
 func (h *Hub) handleProcStream(conn *Connection, cmd *protocol.Command) error {
 	// TODO: Implement stdout/stderr streaming
-	return conn.WriteErr(protocol.ErrInvalidAction, "streaming not yet implemented")
+	return conn.WriteInvalidAction("PROC", "STREAM", []string{"STATUS", "OUTPUT", "STOP", "LIST", "CLEANUP-PORT", "STDIN"})
 }
 
 // handleRun handles RUN and RUN-JSON commands.
@@ -215,7 +203,7 @@ func (h *Hub) handleRun(ctx context.Context, conn *Connection, cmd *protocol.Com
 	}
 
 	if cfg.Command == "" && cfg.ScriptName == "" {
-		return conn.WriteErr(protocol.ErrMissingParam, "command or script_name required")
+		return conn.WriteMissingParam("RUN", "command", "command or script_name required")
 	}
 
 	procCfg := process.ProcessConfig{
@@ -229,7 +217,7 @@ func (h *Hub) handleRun(ctx context.Context, conn *Connection, cmd *protocol.Com
 
 	result, err := h.pm.StartOrReuse(ctx, procCfg)
 	if err != nil {
-		return conn.WriteErr(protocol.ErrInternal, err.Error())
+		return conn.WriteInternalErr(err.Error())
 	}
 
 	response := map[string]any{
@@ -259,19 +247,13 @@ func (h *Hub) handleRelay(ctx context.Context, conn *Connection, cmd *protocol.C
 	case "REQUEST":
 		return h.handleRelayRequest(ctx, conn, cmd)
 	default:
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:         protocol.ErrInvalidAction,
-			Message:      "unknown relay action",
-			Command:      "RELAY",
-			Action:       cmd.SubVerb,
-			ValidActions: []string{"SEND", "BROADCAST", "REQUEST"},
-		})
+		return conn.WriteInvalidAction("RELAY", cmd.SubVerb, []string{"SEND", "BROADCAST", "REQUEST"})
 	}
 }
 
 func (h *Hub) handleRelaySend(conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Args) == 0 {
-		return conn.WriteErr(protocol.ErrMissingParam, "target process ID required")
+		return conn.WriteMissingParam("RELAY SEND", "target", "target process ID required")
 	}
 
 	target := cmd.Args[0]
@@ -311,7 +293,7 @@ func (h *Hub) handleRelayBroadcast(conn *Connection, cmd *protocol.Command) erro
 
 func (h *Hub) handleRelayRequest(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
 	// TODO: Implement request-response pattern with correlation ID
-	return conn.WriteErr(protocol.ErrInvalidAction, "request-response not yet implemented")
+	return conn.WriteInvalidAction("RELAY", "REQUEST", []string{"SEND", "BROADCAST"})
 }
 
 // handleAttach handles ATTACH command for external process registration.
@@ -324,7 +306,7 @@ func (h *Hub) handleAttach(ctx context.Context, conn *Connection, cmd *protocol.
 	}
 
 	if cfg.ID == "" {
-		return conn.WriteErr(protocol.ErrMissingParam, "id required")
+		return conn.WriteMissingParam("ATTACH", "id", "id required")
 	}
 
 	// Note: For a full implementation, the external process would connect
@@ -346,7 +328,7 @@ func (h *Hub) handleAttach(ctx context.Context, conn *Connection, cmd *protocol.
 // handleDetach handles DETACH command for external process removal.
 func (h *Hub) handleDetach(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Args) == 0 {
-		return conn.WriteErr(protocol.ErrMissingParam, "process ID required")
+		return conn.WriteMissingParam("DETACH", "id", "process ID required")
 	}
 
 	h.UnregisterExternalProcess(cmd.Args[0])
@@ -372,13 +354,7 @@ func (h *Hub) handleSession(ctx context.Context, conn *Connection, cmd *protocol
 	case "GET":
 		return h.handleSessionGet(conn, cmd)
 	default:
-		return conn.WriteStructuredErr(&protocol.StructuredError{
-			Code:         protocol.ErrInvalidAction,
-			Message:      "unknown session action",
-			Command:      "SESSION",
-			Action:       cmd.SubVerb,
-			ValidActions: []string{"REGISTER", "UNREGISTER", "HEARTBEAT", "LIST", "GET"},
-		})
+		return conn.WriteInvalidAction("SESSION", cmd.SubVerb, []string{"REGISTER", "UNREGISTER", "HEARTBEAT", "LIST", "GET"})
 	}
 }
 
@@ -429,7 +405,7 @@ func (h *Hub) handleSessionUnregister(conn *Connection, cmd *protocol.Command) e
 func (h *Hub) handleSessionHeartbeat(conn *Connection, cmd *protocol.Command) error {
 	code := conn.SessionCode()
 	if code == "" {
-		return conn.WriteErr(protocol.ErrNotFound, "no session registered")
+		return conn.WriteNotFound("session", "current")
 	}
 
 	if val, ok := h.sessions.Load(code); ok {
@@ -461,12 +437,12 @@ func (h *Hub) handleSessionList(conn *Connection, cmd *protocol.Command) error {
 
 func (h *Hub) handleSessionGet(conn *Connection, cmd *protocol.Command) error {
 	if len(cmd.Args) == 0 {
-		return conn.WriteErr(protocol.ErrMissingParam, "session code required")
+		return conn.WriteMissingParam("SESSION GET", "code", "session code required")
 	}
 
 	val, ok := h.sessions.Load(cmd.Args[0])
 	if !ok {
-		return conn.WriteErr(protocol.ErrNotFound, "session not found")
+		return conn.WriteNotFound("session", cmd.Args[0])
 	}
 
 	session := val.(*Session)
