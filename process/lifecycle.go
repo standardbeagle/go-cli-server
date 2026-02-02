@@ -29,7 +29,7 @@ func (pm *ProcessManager) Start(ctx context.Context, proc *ManagedProcess) error
 
 	// Build the command
 	proc.cmd = exec.CommandContext(proc.ctx, proc.Command, proc.Args...)
-	proc.cmd.Dir = proc.ProjectPath
+	proc.cmd.Dir = proc.WorkingDir // Use WorkingDir for actual cwd (may differ from ProjectPath)
 
 	if len(proc.Env) > 0 {
 		proc.cmd.Env = proc.Env

@@ -54,6 +54,10 @@ type ManagedProcess struct {
 	// ProjectPath is the working directory for the process.
 	ProjectPath string
 
+	// WorkingDir is the working directory for the process.
+	// If empty, ProjectPath is used.
+	WorkingDir string
+
 	// Command is the executable to run.
 	Command string
 
@@ -109,7 +113,8 @@ type ManagedProcess struct {
 // ProcessConfig holds configuration for creating a new process.
 type ProcessConfig struct {
 	ID          string
-	ProjectPath string
+	ProjectPath string // Root project path (for session association)
+	WorkingDir  string // Working directory for the process (if empty, uses ProjectPath)
 	Command     string
 	Args        []string
 	Env         []string
@@ -132,9 +137,16 @@ func NewManagedProcess(cfg ProcessConfig) *ManagedProcess {
 		ctx, cancel = context.WithTimeout(context.Background(), cfg.Timeout)
 	}
 
+	// Default WorkingDir to ProjectPath if not set
+	workingDir := cfg.WorkingDir
+	if workingDir == "" {
+		workingDir = cfg.ProjectPath
+	}
+
 	p := &ManagedProcess{
 		ID:           cfg.ID,
 		ProjectPath:  cfg.ProjectPath,
+		WorkingDir:   workingDir,
 		Command:      cfg.Command,
 		Args:         cfg.Args,
 		Env:          cfg.Env,
