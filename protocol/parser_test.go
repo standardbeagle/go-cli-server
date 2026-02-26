@@ -302,6 +302,55 @@ func TestVerbRegistry(t *testing.T) {
 	}
 }
 
+func TestParseResponseChunk(t *testing.T) {
+	t.Run("chunk with data", func(t *testing.T) {
+		data := []byte("hello world")
+		raw := FormatChunk(data)
+		parser := NewParser(bytes.NewReader(raw))
+		resp, err := parser.ParseResponse()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp.Type != ResponseChunk {
+			t.Errorf("Type = %v, want CHUNK", resp.Type)
+		}
+		if !bytes.Equal(resp.Data, data) {
+			t.Errorf("Data = %q, want %q", resp.Data, data)
+		}
+	})
+
+	t.Run("chunk with empty data", func(t *testing.T) {
+		// FormatChunk with empty data produces "CHUNK -- 0\n;;"
+		// TrimSpace in ParseResponse strips the trailing \n, leaving "CHUNK -- 0"
+		// parseDataPart must handle length 0 without newline separator
+		raw := FormatChunk([]byte{})
+		parser := NewParser(bytes.NewReader(raw))
+		resp, err := parser.ParseResponse()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp.Type != ResponseChunk {
+			t.Errorf("Type = %v, want CHUNK", resp.Type)
+		}
+		if len(resp.Data) != 0 {
+			t.Errorf("Data = %q, want empty", resp.Data)
+		}
+	})
+
+	t.Run("json with empty data", func(t *testing.T) {
+		// Same issue applies to JSON and DATA responses
+		raw := FormatJSON([]byte{})
+		parser := NewParser(bytes.NewReader(raw))
+		resp, err := parser.ParseResponse()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp.Type != ResponseJSON {
+			t.Errorf("Type = %v, want JSON", resp.Type)
+		}
+	})
+}
+
 func TestRoundTrip(t *testing.T) {
 	// Test that commands can be formatted and parsed back
 	original := &Command{

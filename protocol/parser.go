@@ -204,6 +204,11 @@ func (p *Parser) ParseCommand() (*Command, error) {
 func (p *Parser) parseDataPart(dataPart string) ([]byte, error) {
 	newlineIdx := strings.Index(dataPart, "\n")
 	if newlineIdx == -1 {
+		// No newline — only valid if length is 0 (empty data, newline was trailing and got trimmed)
+		lengthStr := strings.TrimSpace(dataPart)
+		if lengthStr == "0" {
+			return []byte{}, nil
+		}
 		return nil, errors.New("data length without data content (missing newline)")
 	}
 
