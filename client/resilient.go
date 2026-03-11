@@ -226,7 +226,8 @@ func (rc *ResilientConn) startHeartbeat() {
 	}
 
 	done := make(chan struct{})
-	rc.heartbeatCancel = func() { close(done) }
+	var once sync.Once
+	rc.heartbeatCancel = func() { once.Do(func() { close(done) }) }
 
 	go rc.heartbeatLoop(done)
 }

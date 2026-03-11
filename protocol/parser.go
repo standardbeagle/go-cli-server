@@ -200,7 +200,8 @@ func (p *Parser) ParseCommand() (*Command, error) {
 	return cmd, nil
 }
 
-// parseDataPart parses "LENGTH\nBASE64DATA" format
+// parseDataPart parses "LENGTH\nBASE64DATA" format.
+// Handles both \n and \r\n line endings for Windows compatibility.
 func (p *Parser) parseDataPart(dataPart string) ([]byte, error) {
 	newlineIdx := strings.Index(dataPart, "\n")
 	if newlineIdx == -1 {
@@ -209,7 +210,7 @@ func (p *Parser) parseDataPart(dataPart string) ([]byte, error) {
 		if lengthStr == "0" {
 			return []byte{}, nil
 		}
-		return nil, errors.New("data length without data content (missing newline)")
+		return nil, fmt.Errorf("data length without data content (missing newline): got %q", dataPart)
 	}
 
 	lengthStr := strings.TrimSpace(dataPart[:newlineIdx])
@@ -219,9 +220,15 @@ func (p *Parser) parseDataPart(dataPart string) ([]byte, error) {
 	}
 
 	base64Data := dataPart[newlineIdx+1:]
+	// Strip trailing \r that may be left from \r\n line endings on Windows
+	base64Data = strings.TrimRight(base64Data, "\r")
+
+	if length == 0 {
+		return []byte{}, nil
+	}
 
 	if len(base64Data) != length {
-		return nil, fmt.Errorf("data length mismatch: expected %d, got %d", length, len(base64Data))
+		return nil, fmt.Errorf("data length mismatch: expected %d, got %d (data: %q)", length, len(base64Data), truncate(base64Data, 50))
 	}
 
 	decoded, err := base64.StdEncoding.DecodeString(base64Data)
@@ -230,6 +237,14 @@ func (p *Parser) parseDataPart(dataPart string) ([]byte, error) {
 	}
 
 	return decoded, nil
+}
+
+// truncate returns a string truncated to maxLen with "..." suffix if needed.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // readUntilTerminator reads from the reader until the terminator is found.
