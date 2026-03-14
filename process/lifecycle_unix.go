@@ -25,6 +25,12 @@ func (pm *ProcessManager) signalProcessGroup(pid int, sig syscall.Signal) error 
 	return syscall.Kill(pid, sig)
 }
 
+// cleanupProcessGroup sends SIGKILL to any surviving members of a process group.
+// Called after cmd.Wait returns to reap grandchildren that outlived the direct child.
+func cleanupProcessGroup(pgid int) {
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+}
+
 // signalTerm sends SIGTERM to the process.
 func signalTerm(pid int) error {
 	return syscall.Kill(pid, syscall.SIGTERM)

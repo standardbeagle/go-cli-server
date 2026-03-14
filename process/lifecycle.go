@@ -89,7 +89,22 @@ func (pm *ProcessManager) Start(ctx context.Context, proc *ManagedProcess) error
 func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 	defer pm.wg.Done()
 
+	// Save PGID before Wait — the PID equals the PGID since Setpgid/
+	// CREATE_NEW_PROCESS_GROUP makes the child the group leader. We need
+	// this after Wait because Getpgid fails on a dead process.
+	pgid := 0
+	if proc.cmd != nil && proc.cmd.Process != nil {
+		pgid = proc.cmd.Process.Pid
+	}
+
 	err := proc.cmd.Wait()
+
+	// Kill any surviving children in the process group. cmd.Wait only waits
+	// for the direct child — grandchildren (e.g. dotnet watch → bifrostui)
+	// can survive as orphans. Signaling a dead/empty group is a no-op.
+	if pgid > 0 {
+		cleanupProcessGroup(pgid)
+	}
 
 	// Cleanup platform-specific resources
 	if proc.cmd != nil && proc.cmd.Process != nil {

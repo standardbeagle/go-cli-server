@@ -114,6 +114,15 @@ func CleanupJobObject(pid int) {
 	}
 }
 
+// cleanupProcessGroup terminates any surviving members of a process group.
+// On Windows, this uses the Job Object if available.
+func cleanupProcessGroup(pgid int) {
+	if val, ok := jobRegistry.Load(pgid); ok {
+		job := val.(windows.Handle)
+		_ = windows.TerminateJobObject(job, 1)
+	}
+}
+
 // signalProcessGroup sends a termination signal to the process group.
 func (pm *ProcessManager) signalProcessGroup(pid int, sig syscall.Signal) error {
 	if val, ok := jobRegistry.Load(pid); ok {
