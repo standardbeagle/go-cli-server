@@ -20,6 +20,7 @@ const (
 	VerbDetach     = "DETACH"     // Detach external process
 	VerbSession    = "SESSION"    // Session management
 	VerbSubprocess = "SUBPROCESS" // Subprocess management
+	VerbScript     = "SCRIPT"     // Script registry management
 	VerbPing       = "PING"
 	VerbInfo       = "INFO"
 	VerbShutdown   = "SHUTDOWN"
@@ -52,19 +53,20 @@ const (
 	SubVerbStart      = "START"
 	SubVerbClear      = "CLEAR"
 	SubVerbSet        = "SET"
+	SubVerbRestart    = "RESTART"
 )
 
 // RunConfig represents configuration for a RUN command.
 type RunConfig struct {
-	ID         string   `json:"id"`
-	Path       string   `json:"path"`
-	Mode       string   `json:"mode"` // background, foreground, foreground-raw
-	ScriptName string   `json:"script_name,omitempty"`
-	Raw        bool     `json:"raw,omitempty"`
-	Command    string   `json:"command,omitempty"`
-	Args       []string `json:"args,omitempty"`
-	Env        []string `json:"env,omitempty"`
-	EnableStdin bool    `json:"enable_stdin,omitempty"` // Enable stdin pipe
+	ID          string   `json:"id"`
+	Path        string   `json:"path"`
+	Mode        string   `json:"mode"` // background, foreground, foreground-raw
+	ScriptName  string   `json:"script_name,omitempty"`
+	Raw         bool     `json:"raw,omitempty"`
+	Command     string   `json:"command,omitempty"`
+	Args        []string `json:"args,omitempty"`
+	Env         []string `json:"env,omitempty"`
+	EnableStdin bool     `json:"enable_stdin,omitempty"` // Enable stdin pipe
 }
 
 // OutputFilter represents filters for PROC OUTPUT command.
@@ -197,7 +199,7 @@ type SubprocessInfo struct {
 	RestartCount    int   `json:"restart_count"`
 
 	// Timestamps (Unix milliseconds)
-	LastCommandMs int64 `json:"last_command_ms,omitempty"`
-	LastHealthyMs int64 `json:"last_healthy_ms,omitempty"`
+	LastCommandMs  int64 `json:"last_command_ms,omitempty"`
+	LastHealthyMs  int64 `json:"last_healthy_ms,omitempty"`
 	StateChangedMs int64 `json:"state_changed_ms,omitempty"`
 }

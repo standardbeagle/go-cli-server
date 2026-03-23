@@ -76,11 +76,11 @@ type Hub struct {
 	sessions sync.Map // sessionCode -> *Session
 
 	// Lifecycle
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	shutdown   atomic.Bool
-	startTime  time.Time
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	shutdown  atomic.Bool
+	startTime time.Time
 
 	// Cleanup callback
 	sessionCleanup func(sessionCode string)
@@ -140,6 +140,15 @@ func (h *Hub) registerBuiltinCommands() {
 		_ = h.commands.Register(CommandDefinition{
 			Verb:    "RUN-JSON",
 			Handler: h.handleRun,
+		})
+	}
+
+	// SCRIPT command (if ProcessManager enabled; registry checked at call time)
+	if h.pm != nil {
+		_ = h.commands.Register(CommandDefinition{
+			Verb:     "SCRIPT",
+			SubVerbs: []string{"LIST", "GET", "OUTPUT", "RESTART", "STOP"},
+			Handler:  h.handleScript,
 		})
 	}
 
@@ -357,11 +366,11 @@ type ExternalProcess struct {
 
 // Message represents a message for relay between processes.
 type Message struct {
-	ID        string `json:"id,omitempty"`
-	From      string `json:"from"`
-	To        string `json:"to"`
-	Type      string `json:"type"`
-	Data      []byte `json:"data,omitempty"`
+	ID        string    `json:"id,omitempty"`
+	From      string    `json:"from"`
+	To        string    `json:"to"`
+	Type      string    `json:"type"`
+	Data      []byte    `json:"data,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 }
 
