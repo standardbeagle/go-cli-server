@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+
+	"github.com/standardbeagle/go-cli-server/script"
 )
 
 // Start begins execution of a process.
@@ -40,9 +42,16 @@ func (pm *ProcessManager) Start(ctx context.Context, proc *ManagedProcess) error
 	// Set platform-specific process attributes
 	setProcAttr(proc.cmd)
 
-	// Connect output streams to ring buffers
-	proc.cmd.Stdout = proc.stdout
-	proc.cmd.Stderr = proc.stderr
+	// Connect output streams to ring buffers, optionally wrapping with line callbacks
+	if proc.outputCallback != nil {
+		proc.stdoutLineWriter = newLineWriter(proc.stdout, proc.ID, proc.outputCallback)
+		proc.stderrLineWriter = newLineWriter(proc.stderr, proc.ID, proc.outputCallback)
+		proc.cmd.Stdout = proc.stdoutLineWriter
+		proc.cmd.Stderr = proc.stderrLineWriter
+	} else {
+		proc.cmd.Stdout = proc.stdout
+		proc.cmd.Stderr = proc.stderr
+	}
 
 	// Setup stdin pipe if enabled
 	if proc.stdinEnabled {
@@ -76,6 +85,14 @@ func (pm *ProcessManager) Start(ctx context.Context, proc *ManagedProcess) error
 	if pm.pidTracker != nil {
 		pgid := getProcessGroupID(pid)
 		_ = pm.pidTracker.Add(proc.ID, pid, pgid, proc.ProjectPath)
+	}
+
+	// Notify script registry of successful start
+	if pm.scriptRegistry != nil {
+		if entry, ok := pm.scriptRegistry.GetByProcessID(proc.ID); ok {
+			entry.SetState(script.StateRunning)
+			entry.IncrementStartCount()
+		}
 	}
 
 	// Start goroutine to wait for completion
@@ -119,6 +136,14 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 	now := time.Now()
 	proc.endTime.Store(&now)
 
+	// Flush any remaining partial output lines
+	if proc.stdoutLineWriter != nil {
+		proc.stdoutLineWriter.flush()
+	}
+	if proc.stderrLineWriter != nil {
+		proc.stderrLineWriter.flush()
+	}
+
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			proc.exitCode.Store(int32(exitErr.ExitCode()))
@@ -127,9 +152,23 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 		}
 		proc.SetState(StateFailed)
 		pm.IncrementFailed()
+
+		if pm.scriptRegistry != nil {
+			if entry, ok := pm.scriptRegistry.GetByProcessID(proc.ID); ok {
+				entry.SetState(script.StateFailed)
+				entry.IncrementFailCount()
+				entry.SetLastError(err.Error())
+			}
+		}
 	} else {
 		proc.exitCode.Store(0)
 		proc.SetState(StateStopped)
+
+		if pm.scriptRegistry != nil {
+			if entry, ok := pm.scriptRegistry.GetByProcessID(proc.ID); ok {
+				entry.SetState(script.StateStopped)
+			}
+		}
 	}
 
 	if pm.pidTracker != nil {
@@ -221,6 +260,14 @@ func (pm *ProcessManager) Restart(ctx context.Context, id string) (*ManagedProce
 		return nil, err
 	}
 
+	// Add restart marker to script entry before stopping
+	if pm.scriptRegistry != nil {
+		if entry, ok := pm.scriptRegistry.GetByProcessID(proc.ID); ok {
+			entry.AddRestartMarker()
+			entry.SetState(script.StateRestarting)
+		}
+	}
+
 	if err := pm.StopProcess(ctx, proc); err != nil {
 		return nil, fmt.Errorf("failed to stop process for restart: %w", err)
 	}
@@ -228,13 +275,14 @@ func (pm *ProcessManager) Restart(ctx context.Context, id string) (*ManagedProce
 	pm.Remove(id)
 
 	newProc := NewManagedProcess(ProcessConfig{
-		ID:          id,
-		ProjectPath: proc.ProjectPath,
-		Command:     proc.Command,
-		Args:        proc.Args,
-		Labels:      proc.Labels,
-		BufferSize:  proc.stdout.Cap(),
-		EnableStdin: proc.stdinEnabled,
+		ID:             id,
+		ProjectPath:    proc.ProjectPath,
+		Command:        proc.Command,
+		Args:           proc.Args,
+		Labels:         proc.Labels,
+		BufferSize:     proc.stdout.Cap(),
+		EnableStdin:    proc.stdinEnabled,
+		OutputCallback: proc.outputCallback,
 	})
 
 	if err := pm.Start(ctx, newProc); err != nil {

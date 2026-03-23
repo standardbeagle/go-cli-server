@@ -91,6 +91,13 @@ type ManagedProcess struct {
 	// stdinEnabled indicates if stdin pipe is available.
 	stdinEnabled bool
 
+	// outputCallback is called for each line of stdout/stderr output.
+	outputCallback OutputCallback
+
+	// lineWriters wrap stdout/stderr when outputCallback is set (nil otherwise).
+	stdoutLineWriter *lineWriter
+	stderrLineWriter *lineWriter
+
 	// startTime records when the process was started.
 	startTime atomic.Pointer[time.Time]
 
@@ -110,18 +117,22 @@ type ManagedProcess struct {
 	done chan struct{}
 }
 
+// OutputCallback is called for each line of process output.
+type OutputCallback func(processID string, line string)
+
 // ProcessConfig holds configuration for creating a new process.
 type ProcessConfig struct {
-	ID          string
-	ProjectPath string // Root project path (for session association)
-	WorkingDir  string // Working directory for the process (if empty, uses ProjectPath)
-	Command     string
-	Args        []string
-	Env         []string
-	Labels      map[string]string
-	BufferSize  int
-	Timeout     time.Duration
-	EnableStdin bool // Enable stdin pipe for writing to process
+	ID             string
+	ProjectPath    string // Root project path (for session association)
+	WorkingDir     string // Working directory for the process (if empty, uses ProjectPath)
+	Command        string
+	Args           []string
+	Env            []string
+	Labels         map[string]string
+	BufferSize     int
+	Timeout        time.Duration
+	EnableStdin    bool           // Enable stdin pipe for writing to process
+	OutputCallback OutputCallback // Called for each line of stdout/stderr (optional)
 }
 
 // NewManagedProcess creates a new ManagedProcess from config.
@@ -144,19 +155,20 @@ func NewManagedProcess(cfg ProcessConfig) *ManagedProcess {
 	}
 
 	p := &ManagedProcess{
-		ID:           cfg.ID,
-		ProjectPath:  cfg.ProjectPath,
-		WorkingDir:   workingDir,
-		Command:      cfg.Command,
-		Args:         cfg.Args,
-		Env:          cfg.Env,
-		Labels:       cfg.Labels,
-		stdout:       NewRingBuffer(bufSize),
-		stderr:       NewRingBuffer(bufSize),
-		stdinEnabled: cfg.EnableStdin,
-		ctx:          ctx,
-		cancel:       cancel,
-		done:         make(chan struct{}),
+		ID:             cfg.ID,
+		ProjectPath:    cfg.ProjectPath,
+		WorkingDir:     workingDir,
+		Command:        cfg.Command,
+		Args:           cfg.Args,
+		Env:            cfg.Env,
+		Labels:         cfg.Labels,
+		stdout:         NewRingBuffer(bufSize),
+		stderr:         NewRingBuffer(bufSize),
+		stdinEnabled:   cfg.EnableStdin,
+		outputCallback: cfg.OutputCallback,
+		ctx:            ctx,
+		cancel:         cancel,
+		done:           make(chan struct{}),
 	}
 
 	p.state.Store(uint32(StatePending))

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/standardbeagle/go-cli-server/script"
 )
 
 var (
@@ -69,6 +71,9 @@ type ProcessManager struct {
 
 	// PID tracking for orphan cleanup
 	pidTracker PIDTracker
+
+	// Script registry for automatic lifecycle integration
+	scriptRegistry *script.Registry
 
 	// Shutdown coordination
 	shutdownOnce sync.Once
@@ -232,6 +237,17 @@ func (pm *ProcessManager) IncrementFailed() {
 // Config returns the manager configuration.
 func (pm *ProcessManager) Config() ManagerConfig {
 	return pm.config
+}
+
+// SetScriptRegistry sets the script registry for automatic lifecycle integration.
+// When set, process lifecycle events automatically update the corresponding ScriptEntry.
+func (pm *ProcessManager) SetScriptRegistry(r *script.Registry) {
+	pm.scriptRegistry = r
+}
+
+// ScriptRegistry returns the currently set script registry, or nil.
+func (pm *ProcessManager) ScriptRegistry() *script.Registry {
+	return pm.scriptRegistry
 }
 
 // IsShuttingDown returns true if the manager is shutting down.
