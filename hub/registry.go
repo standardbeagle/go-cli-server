@@ -26,9 +26,9 @@ type CommandDefinition struct {
 
 // verbHandler holds handlers for a verb and its sub-verbs.
 type verbHandler struct {
-	handler     CommandHandler          // Default handler for the verb
-	subHandlers sync.Map                // subVerb -> CommandHandler
-	validSubs   []string                // List of valid sub-verbs
+	handler     CommandHandler // Default handler for the verb
+	subHandlers sync.Map       // subVerb -> CommandHandler
+	validSubs   []string       // List of valid sub-verbs
 }
 
 // CommandRegistry manages command handlers with lock-free access.
@@ -108,6 +108,10 @@ func (r *CommandRegistry) Dispatch(ctx context.Context, conn *Connection, cmd *p
 		subVerb := strings.ToUpper(cmd.SubVerb)
 		if subHandler, ok := vh.subHandlers.Load(subVerb); ok {
 			return subHandler.(CommandHandler)(ctx, conn, cmd)
+		}
+		// Reject unknown sub-verbs when the command declares valid ones
+		if len(vh.validSubs) > 0 {
+			return conn.WriteInvalidAction(cmd.Verb, cmd.SubVerb, vh.validSubs)
 		}
 	}
 
