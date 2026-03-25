@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,11 +12,13 @@ import (
 
 // TrackedProcess represents a process being tracked for orphan cleanup.
 type TrackedProcess struct {
-	ID          string    `json:"id"`
-	PID         int       `json:"pid"`
-	PGID        int       `json:"pgid"`
-	ProjectPath string    `json:"project_path"`
-	StartedAt   time.Time `json:"started_at"`
+	ID             string    `json:"id"`
+	PID            int       `json:"pid"`
+	PGID           int       `json:"pgid"`
+	ProjectPath    string    `json:"project_path"`
+	StartedAt      time.Time `json:"started_at"`
+	DescendantPIDs []int     `json:"descendants,omitempty"`
+	LastScanAt     time.Time `json:"last_scan_at,omitempty"`
 }
 
 // PIDTracking holds the complete tracking state.
@@ -35,8 +38,9 @@ type FilePIDTracker struct {
 	mu   sync.Mutex
 }
 
-// Ensure FilePIDTracker implements PIDTracker interface.
+// Ensure FilePIDTracker implements PIDTracker and DescendantTracker interfaces.
 var _ PIDTracker = (*FilePIDTracker)(nil)
+var _ DescendantTracker = (*FilePIDTracker)(nil)
 
 // FilePIDTrackerConfig configures the file-based PID tracker.
 type FilePIDTrackerConfig struct {
@@ -216,15 +220,21 @@ func (pt *FilePIDTracker) CleanupOrphans(currentDaemonPID int) (killedCount int,
 	}
 
 	// Different daemon PID means we're recovering from a crash
-	// Check each tracked process and kill if still alive
+	// Check each tracked process and kill if still alive,
+	// including stored descendants from the last scan.
 	for _, proc := range tracking.Processes {
+		// Kill stored descendants first (catches processes that may have
+		// been reparented since the parent died)
+		for _, dpid := range proc.DescendantPIDs {
+			if isProcessAlive(dpid) {
+				killOrphanProcess(dpid, dpid)
+				killedCount++
+			}
+		}
+
 		if isProcessAlive(proc.PID) {
-			// Kill the orphan process (platform-specific)
 			killOrphanProcess(proc.PID, proc.PGID)
-
 			killedCount++
-
-			// Brief wait for process death
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
@@ -243,4 +253,111 @@ func (pt *FilePIDTracker) ListTracked() []TrackedProcess {
 
 	tracking := pt.loadLocked()
 	return tracking.Processes
+}
+
+// UpdateDescendants updates the descendant PIDs for a tracked process.
+func (pt *FilePIDTracker) UpdateDescendants(pid int, descendants []int) error {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	tracking := pt.loadLocked()
+	now := time.Now()
+
+	for i := range tracking.Processes {
+		if tracking.Processes[i].PID == pid {
+			tracking.Processes[i].DescendantPIDs = descendants
+			tracking.Processes[i].LastScanAt = now
+			return pt.saveLocked(tracking)
+		}
+	}
+	return nil
+}
+
+// ListAllPIDs returns a flat list of all tracked PIDs and their descendants.
+func (pt *FilePIDTracker) ListAllPIDs() []int {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	tracking := pt.loadLocked()
+	seen := make(map[int]struct{})
+	var result []int
+
+	for _, proc := range tracking.Processes {
+		if _, ok := seen[proc.PID]; !ok {
+			seen[proc.PID] = struct{}{}
+			result = append(result, proc.PID)
+		}
+		for _, dpid := range proc.DescendantPIDs {
+			if _, ok := seen[dpid]; !ok {
+				seen[dpid] = struct{}{}
+				result = append(result, dpid)
+			}
+		}
+	}
+	return result
+}
+
+// GetDescendants returns the stored descendant PIDs for a given process PID.
+func (pt *FilePIDTracker) GetDescendants(pid int) []int {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	tracking := pt.loadLocked()
+	for _, proc := range tracking.Processes {
+		if proc.PID == pid {
+			return proc.DescendantPIDs
+		}
+	}
+	return nil
+}
+
+// StartDescendantScanner starts a background goroutine that periodically
+// scans the descendant tree of each tracked process and persists results.
+// The scanner stops when the provided context is cancelled.
+func (pt *FilePIDTracker) StartDescendantScanner(ctx context.Context, interval time.Duration) {
+	go pt.descendantScanLoop(ctx, interval)
+}
+
+// descendantScanLoop runs the periodic scan until ctx is cancelled.
+func (pt *FilePIDTracker) descendantScanLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pt.scanDescendants()
+		}
+	}
+}
+
+// scanDescendants scans all tracked processes and updates their descendants.
+func (pt *FilePIDTracker) scanDescendants() {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	tracking := pt.loadLocked()
+	if len(tracking.Processes) == 0 {
+		return
+	}
+
+	now := time.Now()
+	changed := false
+
+	for i := range tracking.Processes {
+		pid := tracking.Processes[i].PID
+		if !isProcessAlive(pid) {
+			continue
+		}
+		descendants := scanDescendantPIDs(pid)
+		tracking.Processes[i].DescendantPIDs = descendants
+		tracking.Processes[i].LastScanAt = now
+		changed = true
+	}
+
+	if changed {
+		_ = pt.saveLocked(tracking)
+	}
 }

@@ -22,6 +22,7 @@ func setProcAttr(cmd *exec.Cmd) {
 
 // signalProcessGroup sends a signal to the process group AND all descendants.
 // This catches grandchildren that created new process groups/sessions.
+// Also signals stored descendants from the PID tracker.
 func (pm *ProcessManager) signalProcessGroup(pid int, sig syscall.Signal) error {
 	// Signal the process group
 	pgid, err := syscall.Getpgid(pid)
@@ -31,9 +32,24 @@ func (pm *ProcessManager) signalProcessGroup(pid int, sig syscall.Signal) error 
 		_ = syscall.Kill(pid, sig)
 	}
 
-	// Also signal all descendants (catches escapees in different groups)
-	for _, childPID := range findAllDescendants(pid) {
+	// Signal all live descendants (catches escapees in different groups)
+	liveDescendants := findAllDescendants(pid)
+	for _, childPID := range liveDescendants {
 		_ = syscall.Kill(childPID, sig)
+	}
+
+	// Signal stored descendants from tracker (catches PIDs that may have
+	// been reparented since the parent died between scans)
+	if dt, ok := pm.pidTracker.(DescendantTracker); ok {
+		live := make(map[int]struct{}, len(liveDescendants))
+		for _, d := range liveDescendants {
+			live[d] = struct{}{}
+		}
+		for _, dpid := range dt.GetDescendants(pid) {
+			if _, already := live[dpid]; !already {
+				_ = syscall.Kill(dpid, sig)
+			}
+		}
 	}
 
 	return nil
@@ -54,6 +70,17 @@ func cleanupProcessTree(pid int) {
 	descendants := findAllDescendants(pid)
 	for _, childPID := range descendants {
 		_ = syscall.Kill(childPID, syscall.SIGKILL)
+	}
+}
+
+// killStoredDescendants kills PIDs from the tracker's stored descendant list.
+// This catches processes that were descendants at the last scan but may have
+// been reparented or escaped since then.
+func killStoredDescendants(pids []int) {
+	for _, pid := range pids {
+		if isProcessAlive(pid) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
 	}
 }
 

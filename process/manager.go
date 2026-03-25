@@ -37,6 +37,15 @@ type PIDTracker interface {
 	Remove(id string, projectPath string) error
 }
 
+// DescendantTracker extends PIDTracker with descendant tree tracking.
+// Implementations can start a background scanner to periodically discover
+// and persist the full descendant tree of each tracked process.
+type DescendantTracker interface {
+	PIDTracker
+	StartDescendantScanner(ctx context.Context, interval time.Duration)
+	GetDescendants(pid int) []int
+}
+
 // ManagerConfig holds configuration for the ProcessManager.
 type ManagerConfig struct {
 	DefaultTimeout    time.Duration
@@ -76,11 +85,15 @@ type ProcessManager struct {
 	scriptRegistry *script.Registry
 
 	// Shutdown coordination
-	shutdownOnce sync.Once
-	shutdownChan chan struct{}
-	shuttingDown atomic.Bool
-	wg           sync.WaitGroup
+	shutdownOnce  sync.Once
+	shutdownChan  chan struct{}
+	shuttingDown  atomic.Bool
+	wg            sync.WaitGroup
+	scannerCancel context.CancelFunc
 }
+
+// DefaultScanInterval is the default interval for descendant tree scanning.
+const DefaultScanInterval = 5 * time.Second
 
 // NewProcessManager creates a new ProcessManager with the given configuration.
 func NewProcessManager(config ManagerConfig) *ProcessManager {
@@ -93,6 +106,13 @@ func NewProcessManager(config ManagerConfig) *ProcessManager {
 	if config.HealthCheckPeriod > 0 {
 		pm.wg.Add(1)
 		go pm.healthCheckLoop()
+	}
+
+	// Start descendant scanner if the PID tracker supports it
+	if dt, ok := pm.pidTracker.(DescendantTracker); ok {
+		ctx, cancel := context.WithCancel(context.Background())
+		pm.scannerCancel = cancel
+		dt.StartDescendantScanner(ctx, DefaultScanInterval)
 	}
 
 	return pm
@@ -262,6 +282,11 @@ func (pm *ProcessManager) Shutdown(ctx context.Context) error {
 	pm.shutdownOnce.Do(func() {
 		pm.shuttingDown.Store(true)
 		close(pm.shutdownChan)
+
+		// Stop the descendant scanner
+		if pm.scannerCancel != nil {
+			pm.scannerCancel()
+		}
 
 		aggressiveMode := false
 		if deadline, ok := ctx.Deadline(); ok {

@@ -12,3 +12,9 @@ func killOrphanProcess(pid, pgid int) {
 	// Also try direct kill in case process group fails
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 }
+
+// scanDescendantPIDs returns all descendant PIDs for the given process.
+// Delegates to findAllDescendants which uses /proc (Linux) or pgrep (macOS).
+func scanDescendantPIDs(pid int) []int {
+	return findAllDescendants(pid)
+}

@@ -15,3 +15,13 @@ func killOrphanProcess(pid, pgid int) {
 	}
 	_ = proc.Kill()
 }
+
+// scanDescendantPIDs is a no-op on Windows.
+// Windows uses Job Objects which automatically track all descendants.
+func scanDescendantPIDs(pid int) []int {
+	return nil
+}
+
+// killStoredDescendants is a no-op on Windows.
+// Windows Job Objects handle descendant cleanup automatically.
+func killStoredDescendants(pids []int) {}

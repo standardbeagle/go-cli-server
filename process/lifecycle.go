@@ -114,6 +114,12 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 		pgid = proc.cmd.Process.Pid
 	}
 
+	// Look up stored descendants before Wait (while PM state is still valid)
+	var storedDescendants []int
+	if dt, ok := pm.pidTracker.(DescendantTracker); ok {
+		storedDescendants = dt.GetDescendants(proc.PID())
+	}
+
 	err := proc.cmd.Wait()
 
 	// Kill any surviving children in the process group. cmd.Wait only waits
@@ -122,6 +128,10 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 	if pgid > 0 {
 		cleanupProcessGroup(pgid)
 	}
+
+	// Kill stored descendants from tracker (catches processes that died
+	// and were replaced between scans)
+	killStoredDescendants(storedDescendants)
 
 	// Cleanup platform-specific resources
 	if proc.cmd != nil && proc.cmd.Process != nil {
