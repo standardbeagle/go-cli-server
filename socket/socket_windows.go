@@ -83,8 +83,8 @@ func (sm *Manager) Listen() (net.Listener, error) {
 		return nil, err
 	}
 
-	if _, err := os.Stat(sm.config.Path); err == nil {
-		os.Remove(sm.config.Path)
+	if err := sm.cleanupStale(); err != nil {
+		return nil, fmt.Errorf("failed to cleanup stale socket: %w", err)
 	}
 
 	listener, err := net.Listen("unix", sm.config.Path)
@@ -94,6 +94,7 @@ func (sm *Manager) Listen() (net.Listener, error) {
 
 	if err := sm.writePIDFile(); err != nil {
 		listener.Close()
+		os.Remove(sm.config.Path)
 		return nil, fmt.Errorf("failed to write PID file: %w", err)
 	}
 
@@ -141,21 +142,60 @@ func (sm *Manager) checkExisting() error {
 		return fmt.Errorf("failed to read PID file: %w", err)
 	}
 
-	pid, err := strconv.Atoi(string(data))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
 		os.Remove(sm.pidFile)
 		return nil
 	}
 
-	if isProcessRunning(pid) {
-		conn, err := net.DialTimeout("unix", sm.config.Path, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return ErrDaemonRunning
-		}
+	if !isProcessRunning(pid) {
+		os.Remove(sm.pidFile)
+		return nil
 	}
 
-	os.Remove(sm.pidFile)
+	if !sm.isOurDaemonProcess(pid) {
+		os.Remove(sm.pidFile)
+		return nil
+	}
+
+	conn, err := net.DialTimeout("unix", sm.config.Path, 500*time.Millisecond)
+	if err != nil {
+		// Process exists but socket unresponsive - terminate the zombie
+		terminateProcess(pid)
+		time.Sleep(100 * time.Millisecond)
+		os.Remove(sm.pidFile)
+		return nil
+	}
+	conn.Close()
+
+	return ErrDaemonRunning
+}
+
+// isOurDaemonProcess checks if the PID belongs to this hub.
+func (sm *Manager) isOurDaemonProcess(pid int) bool {
+	if sm.processMatcher != nil {
+		return sm.processMatcher(pid)
+	}
+	// On Windows without a matcher, assume any running process with our PID file is ours
+	return true
+}
+
+// cleanupStale removes a stale socket file that no daemon is listening on.
+func (sm *Manager) cleanupStale() error {
+	if _, err := os.Stat(sm.config.Path); os.IsNotExist(err) {
+		return nil
+	}
+
+	conn, err := net.DialTimeout("unix", sm.config.Path, 100*time.Millisecond)
+	if err == nil {
+		conn.Close()
+		return ErrDaemonRunning
+	}
+
+	if err := os.Remove(sm.config.Path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove stale socket: %w", err)
+	}
+
 	return nil
 }
 
@@ -163,6 +203,16 @@ func (sm *Manager) checkExisting() error {
 func (sm *Manager) writePIDFile() error {
 	pid := os.Getpid()
 	return os.WriteFile(sm.pidFile, []byte(strconv.Itoa(pid)), 0600)
+}
+
+// terminateProcess forcibly terminates a process by PID on Windows.
+func terminateProcess(pid int) {
+	handle, err := syscall.OpenProcess(syscall.PROCESS_TERMINATE, false, uint32(pid))
+	if err != nil {
+		return
+	}
+	defer syscall.CloseHandle(handle)
+	syscall.TerminateProcess(handle, 1)
 }
 
 // Connect attempts to connect to an existing socket.
