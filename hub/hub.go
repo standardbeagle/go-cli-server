@@ -84,6 +84,9 @@ type Hub struct {
 
 	// Cleanup callback
 	sessionCleanup func(sessionCode string)
+
+	// Shutdown callback - called when hub receives SHUTDOWN command
+	onShutdown func()
 }
 
 // New creates a new Hub with the given configuration.
@@ -314,6 +317,13 @@ func (h *Hub) cleanupSession(sessionCode string) {
 // SetSessionCleanup sets a callback for session cleanup.
 func (h *Hub) SetSessionCleanup(fn func(sessionCode string)) {
 	h.sessionCleanup = fn
+}
+
+// SetOnShutdown sets a callback invoked when the hub receives a SHUTDOWN command.
+// This allows the host process to react to remote shutdown requests
+// (e.g., cancel a signal context so the process exits cleanly).
+func (h *Hub) SetOnShutdown(fn func()) {
+	h.onShutdown = fn
 }
 
 // RegisterSession registers a session with the Hub.

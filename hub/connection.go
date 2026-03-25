@@ -14,9 +14,9 @@ import (
 
 // Connection handles a single client connection to the hub.
 type Connection struct {
-	id     int64
-	conn   net.Conn
-	hub    *Hub
+	id   int64
+	conn net.Conn
+	hub  *Hub
 
 	parser *protocol.Parser
 	writer *protocol.Writer
@@ -124,7 +124,12 @@ func (c *Connection) handleInfo() error {
 // handleShutdown initiates hub shutdown.
 func (c *Connection) handleShutdown() error {
 	_ = c.WriteOK("shutting down")
-	go func() { _ = c.hub.Stop(context.Background()) }()
+	go func() {
+		if c.hub.onShutdown != nil {
+			c.hub.onShutdown()
+		}
+		_ = c.hub.Stop(context.Background())
+	}()
 	return nil
 }
 
