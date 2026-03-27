@@ -3,9 +3,6 @@ package process
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os/exec"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -530,87 +527,11 @@ func (pm *ProcessManager) checkStoppingProcess(proc *ManagedProcess) {
 
 // KillProcessByPort finds and kills processes listening on the specified port.
 func (pm *ProcessManager) KillProcessByPort(ctx context.Context, port int) ([]int, error) {
-	pids := pm.findProcessesByPortLsof(ctx, port)
-
-	if len(pids) == 0 {
-		pids = pm.findProcessesByPortSs(ctx, port)
-	}
-
+	pids := FindPIDsByPort(port)
 	if len(pids) == 0 {
 		return nil, nil
 	}
-
 	return pm.killProcesses(pids), nil
-}
-
-func (pm *ProcessManager) findProcessesByPortLsof(ctx context.Context, port int) []int {
-	cmd := exec.CommandContext(ctx, "lsof", "-ti", fmt.Sprintf(":%d", port))
-	output, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-
-	return pm.parsePIDLines(strings.TrimSpace(string(output)))
-}
-
-func (pm *ProcessManager) findProcessesByPortSs(ctx context.Context, port int) []int {
-	cmd := exec.CommandContext(ctx, "ss", "-tlnp")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-
-	var pids []int
-	lines := strings.Split(string(output), "\n")
-	portPattern := fmt.Sprintf(":%d", port)
-
-	for _, line := range lines {
-		if !strings.Contains(line, portPattern) {
-			continue
-		}
-
-		start := strings.Index(line, "pid=")
-		if start == -1 {
-			continue
-		}
-		start += 4
-
-		end := strings.IndexAny(line[start:], ",)")
-		if end == -1 {
-			continue
-		}
-
-		var pid int
-		if _, err := fmt.Sscanf(line[start:start+end], "%d", &pid); err == nil {
-			pids = append(pids, pid)
-		}
-	}
-
-	return pids
-}
-
-func (pm *ProcessManager) parsePIDLines(output string) []int {
-	if output == "" {
-		return nil
-	}
-
-	pidLines := strings.Split(output, "\n")
-	var pids []int
-
-	for _, line := range pidLines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var pid int
-		if _, err := fmt.Sscanf(line, "%d", &pid); err != nil {
-			continue
-		}
-		pids = append(pids, pid)
-	}
-
-	return pids
 }
 
 func (pm *ProcessManager) killProcesses(pids []int) []int {

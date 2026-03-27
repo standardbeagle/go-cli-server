@@ -758,10 +758,8 @@ func TestErrorTypes(t *testing.T) {
 	}
 }
 
-// TestParsePIDLines verifies PID parsing from lsof output.
-func TestParsePIDLines(t *testing.T) {
-	pm := NewProcessManager(ManagerConfig{HealthCheckPeriod: 0})
-
+// TestParsePIDOutput verifies PID parsing from lsof output.
+func TestParsePIDOutput(t *testing.T) {
 	tests := []struct {
 		name   string
 		output string
@@ -777,14 +775,14 @@ func TestParsePIDLines(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := pm.parsePIDLines(tt.output)
+			got := parsePIDOutput(tt.output)
 			if len(got) != len(tt.want) {
-				t.Errorf("parsePIDLines(%q) = %v, want %v", tt.output, got, tt.want)
+				t.Errorf("parsePIDOutput(%q) = %v, want %v", tt.output, got, tt.want)
 				return
 			}
 			for i := range got {
 				if got[i] != tt.want[i] {
-					t.Errorf("parsePIDLines(%q)[%d] = %d, want %d", tt.output, i, got[i], tt.want[i])
+					t.Errorf("parsePIDOutput(%q)[%d] = %d, want %d", tt.output, i, got[i], tt.want[i])
 				}
 			}
 		})
