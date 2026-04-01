@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/script"
@@ -537,20 +538,19 @@ func (pm *ProcessManager) KillProcessByPort(ctx context.Context, port int) ([]in
 func (pm *ProcessManager) killProcesses(pids []int) []int {
 	var killedPids []int
 
+	// Phase 1: SIGTERM to process group + descendants for each PID
 	for _, pid := range pids {
-		if err := signalTerm(pid); err != nil {
-			if !isNoSuchProcess(err) {
-				continue
-			}
-		}
+		pm.signalProcessGroup(pid, syscall.SIGTERM)
 		killedPids = append(killedPids, pid)
 	}
 
-	time.Sleep(500 * time.Millisecond)
+	// Phase 2: Wait for graceful exit
+	time.Sleep(3 * time.Second)
 
+	// Phase 3: SIGKILL escalation for survivors
 	for _, pid := range pids {
 		if isProcessAlive(pid) {
-			_ = signalKill(pid)
+			cleanupProcessTree(pid)
 		}
 	}
 
