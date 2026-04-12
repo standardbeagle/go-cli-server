@@ -203,3 +203,21 @@ func isNoSuchProcess(err error) bool {
 func getProcessGroupID(pid int) int {
 	return pid
 }
+
+// cleanupProcessTree forcefully terminates a process and its job-object tree.
+// On Windows, signalProcessGroup already terminates the full job object, so this
+// is the SIGKILL escalation fallback for stragglers. Uses the job registry when
+// available; otherwise falls back to a direct process kill.
+func cleanupProcessTree(pid int) {
+	if val, ok := jobRegistry.Load(pid); ok {
+		job := val.(windows.Handle)
+		if err := windows.TerminateJobObject(job, 1); err == nil {
+			return
+		}
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	_ = proc.Kill()
+}
