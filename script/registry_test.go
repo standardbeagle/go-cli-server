@@ -613,3 +613,45 @@ func TestEntry_OwnershipAtomicity(t *testing.T) {
 		t.Error("Owner() = empty after concurrent writes, want a session")
 	}
 }
+
+func TestRegistry_Remove(t *testing.T) {
+	reg := NewRegistry()
+	cfg := &Config{Run: "npm start"}
+
+	_, err := reg.Register("dev", "/project", cfg)
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	_, err = reg.Register("test", "/project", cfg)
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	// Remove one entry
+	if !reg.Remove("dev", "/project") {
+		t.Error("Remove should return true for existing entry")
+	}
+
+	// Verify it's gone
+	_, ok := reg.Get("dev", "/project")
+	if ok {
+		t.Error("Get should return false after Remove")
+	}
+
+	// Other entry still exists
+	_, ok = reg.Get("test", "/project")
+	if !ok {
+		t.Error("Remove should not affect other entries")
+	}
+
+	// Removing again returns false
+	if reg.Remove("dev", "/project") {
+		t.Error("Remove should return false for already-removed entry")
+	}
+
+	// List should only contain "test"
+	entries := reg.List("/project")
+	if len(entries) != 1 || entries[0].Name != "test" {
+		t.Errorf("List after Remove: got %d entries, want 1 (test)", len(entries))
+	}
+}

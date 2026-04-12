@@ -388,6 +388,14 @@ func (r *Registry) GetByProcessID(processID string) (*Entry, bool) {
 	return found, true
 }
 
+// Remove deletes an Entry by name and project path.
+// Returns true if the entry was found and removed.
+func (r *Registry) Remove(name, projectPath string) bool {
+	key := entryKey(projectPath, name)
+	_, existed := r.entries.LoadAndDelete(key)
+	return existed
+}
+
 // ListAll returns all Entry instances across all projects.
 func (r *Registry) ListAll() []*Entry {
 	var result []*Entry
