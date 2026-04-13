@@ -20,35 +20,58 @@ func setProcAttr(cmd *exec.Cmd) {
 	}
 }
 
-// signalProcessGroup sends a signal to the process group AND all descendants.
-// This catches grandchildren that created new process groups/sessions.
-// Also signals stored descendants from the PID tracker.
+// signalProcessGroup sends a signal to the process group AND every descendant
+// of pid, including setsid-escaped grandchildren that live in independent
+// sessions or process groups.
+//
+// Since child processes are started with Setpgid=true, the root pid is the
+// process-group leader — pgid equals pid. We never call Getpgid on pid because
+// by the time we reach this function the root may already have been SIGKILLed
+// by the exec.CommandContext watcher (triggered from proc.Cancel()). Getpgid
+// on a dead process returns ESRCH and loses the pgroup signal entirely.
+//
+// The caller should snapshot descendants via ProcessManager.snapshotDescendants
+// BEFORE cancelling the process context. The managed-process descendant cache
+// and the persistent tracker are consulted here to catch setsid-escaped
+// grandchildren that have since been reparented to init.
 func (pm *ProcessManager) signalProcessGroup(pid int, sig syscall.Signal) error {
-	// Signal the process group
-	pgid, err := syscall.Getpgid(pid)
-	if err == nil && pgid > 0 {
-		_ = syscall.Kill(-pgid, sig)
-	} else {
-		_ = syscall.Kill(pid, sig)
-	}
+	// Signal the root process group. pgid == pid for Setpgid=true children.
+	// This reaches every process still in the root's group — including the
+	// root itself, its foreground children, and any same-group grandchildren.
+	_ = syscall.Kill(-pid, sig)
 
-	// Signal all live descendants (catches escapees in different groups)
-	liveDescendants := findAllDescendants(pid)
-	for _, childPID := range liveDescendants {
-		_ = syscall.Kill(childPID, sig)
-	}
-
-	// Signal stored descendants from tracker (catches PIDs that may have
-	// been reparented since the parent died between scans)
-	if dt, ok := pm.pidTracker.(DescendantTracker); ok {
-		live := make(map[int]struct{}, len(liveDescendants))
-		for _, d := range liveDescendants {
-			live[d] = struct{}{}
+	// Build the descendant set from every available source:
+	//   1. live PPID walk (best-effort, may be empty if root is already gone)
+	//   2. descendant cache on the managed process (snapshotted pre-cancel)
+	//   3. persistent PID tracker (background scanner results)
+	seen := make(map[int]struct{})
+	addDescendant := func(childPID int) {
+		if childPID <= 1 || childPID == pid {
+			return
 		}
-		for _, dpid := range dt.GetDescendants(pid) {
-			if _, already := live[dpid]; !already {
-				_ = syscall.Kill(dpid, sig)
-			}
+		if _, ok := seen[childPID]; ok {
+			return
+		}
+		seen[childPID] = struct{}{}
+		_ = syscall.Kill(childPID, sig)
+		// Setsid-escaped descendants have their own pgid — signal that
+		// group so any grandchildren of the escapee die too.
+		if childPgid, err := syscall.Getpgid(childPID); err == nil && childPgid > 0 && childPgid != pid {
+			_ = syscall.Kill(-childPgid, sig)
+		}
+	}
+
+	for _, d := range findAllDescendants(pid) {
+		addDescendant(d)
+	}
+	if proc := pm.lookupByPID(pid); proc != nil {
+		for _, d := range proc.Descendants() {
+			addDescendant(d)
+		}
+	}
+	if dt, ok := pm.pidTracker.(DescendantTracker); ok {
+		for _, d := range dt.GetDescendants(pid) {
+			addDescendant(d)
 		}
 	}
 
@@ -85,30 +108,104 @@ func killStoredDescendants(pids []int) {
 }
 
 // findAllDescendants returns all descendant PIDs recursively.
-// Tries /proc (Linux) first, falls back to pgrep (macOS/BSD).
+//
+// On Linux, walks the full /proc table by PPID to a fixed point. This is
+// robust against processes that call setsid() and are reparented to init
+// when an intermediate ancestor dies: as long as the walk happens while
+// the tree is still intact, it catches every descendant regardless of
+// process-group membership.
+//
+// On non-Linux systems, falls back to `pgrep -P PID` recursion.
 func findAllDescendants(pid int) []int {
-	// Try /proc/PID/task/PID/children (Linux)
-	childrenFile := fmt.Sprintf("/proc/%d/task/%d/children", pid, pid)
-	if data, err := os.ReadFile(childrenFile); err == nil {
-		return parseProcChildren(data)
+	if descendants, ok := findAllDescendantsProc(pid); ok {
+		return descendants
 	}
-
-	// Fallback: pgrep -P PID
 	return pgrepChildren(pid)
 }
 
-func parseProcChildren(data []byte) []int {
-	var result []int
-	for _, field := range strings.Fields(string(data)) {
-		pid, err := strconv.Atoi(field)
+// findAllDescendantsProc walks /proc/*/stat PPID fields, building the
+// descendant set iteratively until it stabilizes. Returns (nil, false)
+// when /proc is not available (non-Linux).
+func findAllDescendantsProc(root int) ([]int, bool) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, false
+	}
+
+	// Collect (pid, ppid) for every numeric /proc entry.
+	type procEntry struct {
+		pid  int
+		ppid int
+	}
+	procs := make([]procEntry, 0, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		if len(name) == 0 || name[0] < '0' || name[0] > '9' {
+			continue
+		}
+		pid, err := strconv.Atoi(name)
 		if err != nil || pid <= 0 {
 			continue
 		}
-		result = append(result, pid)
-		// Recurse
-		result = append(result, findAllDescendants(pid)...)
+		ppid, ok := readProcPPID(pid)
+		if !ok {
+			continue
+		}
+		procs = append(procs, procEntry{pid: pid, ppid: ppid})
 	}
-	return result
+
+	// Iterative BFS/fixed-point: start with root, repeatedly pull in any
+	// process whose PPID is already in the set. Each iteration is O(n).
+	set := map[int]struct{}{root: {}}
+	for {
+		added := false
+		for _, p := range procs {
+			if _, already := set[p.pid]; already {
+				continue
+			}
+			if _, parentIn := set[p.ppid]; parentIn {
+				set[p.pid] = struct{}{}
+				added = true
+			}
+		}
+		if !added {
+			break
+		}
+	}
+
+	result := make([]int, 0, len(set)-1)
+	for pid := range set {
+		if pid == root {
+			continue
+		}
+		result = append(result, pid)
+	}
+	return result, true
+}
+
+// readProcPPID parses the PPID (field 4) out of /proc/<pid>/stat.
+// The comm field (field 2) is parenthesized and may contain spaces or
+// parentheses, so we anchor on the last ')'.
+func readProcPPID(pid int) (int, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, false
+	}
+	s := string(data)
+	idx := strings.LastIndexByte(s, ')')
+	if idx < 0 || idx+2 >= len(s) {
+		return 0, false
+	}
+	// After ") ": state PPID ...
+	fields := strings.Fields(s[idx+2:])
+	if len(fields) < 2 {
+		return 0, false
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, false
+	}
+	return ppid, true
 }
 
 func pgrepChildren(pid int) []int {

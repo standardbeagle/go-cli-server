@@ -115,6 +115,11 @@ type ManagedProcess struct {
 
 	// done is closed when the process completes.
 	done chan struct{}
+
+	// descendants holds the last-known descendant PIDs, snapshotted while
+	// the process tree was still intact. Written before stop/force-kill so
+	// setsid-escaped grandchildren survive the parent's death for cleanup.
+	descendants atomic.Pointer[[]int]
 }
 
 // OutputCallback is called for each line of process output.
@@ -241,6 +246,22 @@ func (p *ManagedProcess) IsDone() bool {
 // Done returns a channel that is closed when the process completes.
 func (p *ManagedProcess) Done() <-chan struct{} {
 	return p.done
+}
+
+// SetDescendants atomically replaces the cached descendant PID list. Used by
+// the stop path to snapshot the tree while it is still walkable.
+func (p *ManagedProcess) SetDescendants(pids []int) {
+	// Copy to avoid sharing caller's backing array.
+	cp := append([]int(nil), pids...)
+	p.descendants.Store(&cp)
+}
+
+// Descendants returns the last-snapshotted descendant PIDs, or nil if none.
+func (p *ManagedProcess) Descendants() []int {
+	if d := p.descendants.Load(); d != nil {
+		return *d
+	}
+	return nil
 }
 
 // Stdout returns a snapshot of the stdout buffer.

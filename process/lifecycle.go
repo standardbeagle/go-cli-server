@@ -198,6 +198,29 @@ func (pm *ProcessManager) Stop(ctx context.Context, id string) error {
 	return pm.StopProcess(ctx, proc)
 }
 
+// snapshotDescendants captures the current descendant tree for proc and stores
+// it on the ManagedProcess. Must be called while the root process is still
+// alive — any later call will return a partial or empty set because cancelled
+// contexts cause exec.CommandContext to SIGKILL the root, reparenting every
+// descendant to init and destroying the PPID chain.
+func (pm *ProcessManager) snapshotDescendants(proc *ManagedProcess) {
+	if proc == nil || proc.cmd == nil || proc.cmd.Process == nil {
+		return
+	}
+	pid := proc.cmd.Process.Pid
+	descendants := findAllDescendants(pid)
+	proc.SetDescendants(descendants)
+
+	// Mirror the snapshot into the persistent tracker if available so that
+	// the SIGKILL escalation path (which runs after Wait() reaps the root)
+	// still has something to kill.
+	if pm.pidTracker != nil {
+		if dt, ok := pm.pidTracker.(DescendantTracker); ok {
+			_ = dt.UpdateDescendants(pid, descendants)
+		}
+	}
+}
+
 // StopProcess terminates the given process.
 func (pm *ProcessManager) StopProcess(ctx context.Context, proc *ManagedProcess) error {
 	state := proc.State()
@@ -217,6 +240,11 @@ func (pm *ProcessManager) StopProcess(ctx context.Context, proc *ManagedProcess)
 		return fmt.Errorf("%w: cannot stop process %s (state: %s)",
 			ErrInvalidState, proc.ID, proc.State())
 	}
+
+	// Snapshot descendants BEFORE cancelling the process context. Cancelling
+	// causes the exec.CommandContext watcher to SIGKILL the root PID, which
+	// reparents every descendant to init and breaks any post-cancel PPID walk.
+	pm.snapshotDescendants(proc)
 
 	proc.Cancel()
 

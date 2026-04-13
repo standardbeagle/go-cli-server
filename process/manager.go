@@ -42,6 +42,7 @@ type DescendantTracker interface {
 	PIDTracker
 	StartDescendantScanner(ctx context.Context, interval time.Duration)
 	GetDescendants(pid int) []int
+	UpdateDescendants(pid int, descendants []int) error
 }
 
 // ManagerConfig holds configuration for the ProcessManager.
@@ -219,6 +220,23 @@ func (pm *ProcessManager) GetByPID(pid int) *ManagedProcess {
 	pm.processes.Range(func(key, value any) bool {
 		proc := value.(*ManagedProcess)
 		if proc.PID() == pid && proc.IsRunning() {
+			found = proc
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// lookupByPID returns the managed process with the given OS PID regardless of
+// its current state. Used internally by the stop/kill path to recover the
+// ManagedProcess after it has transitioned to Stopping/Stopped/Failed so we
+// can still consult cached descendants.
+func (pm *ProcessManager) lookupByPID(pid int) *ManagedProcess {
+	var found *ManagedProcess
+	pm.processes.Range(func(key, value any) bool {
+		proc := value.(*ManagedProcess)
+		if proc.PID() == pid {
 			found = proc
 			return false
 		}
