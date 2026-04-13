@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/socket"
@@ -113,6 +114,19 @@ func (c *AutoStartConn) startHub() error {
 		daemonPath := selfPath + "-daemon"
 		if _, err := os.Stat(daemonPath); err == nil {
 			execPath = daemonPath
+		} else if isGoTestBinary(selfPath) {
+			// Refuse to self-spawn a Go test binary. Without a dedicated
+			// daemon binary next to it, falling through to selfPath would
+			// invoke the test binary with subcommand args like
+			// "daemon start --socket /path". The test binary's flag.Parse()
+			// ignores positional args and runs the entire test suite
+			// recursively, producing long-lived leaked processes that stay
+			// alive for hours and break subsequent test runs.
+			//
+			// Callers in test context should set HubPath explicitly or
+			// ensure an in-process hub is already listening on SocketPath
+			// before calling Connect().
+			return fmt.Errorf("refusing to self-spawn test binary %q: set AutoStartConfig.HubPath or ensure an in-process hub is listening on %s before calling Connect()", selfPath, c.config.SocketPath)
 		} else {
 			// Fall back to self-exec if daemon binary not found
 			execPath = selfPath
@@ -143,6 +157,22 @@ func (c *AutoStartConn) startHub() error {
 	go cmd.Wait() //nolint:errcheck
 
 	return nil
+}
+
+// isGoTestBinary returns true if the given executable path looks like a Go
+// test binary. Go test binaries end in ".test" (or ".test.exe" on Windows) or
+// live under a go-build temp directory. Detecting these prevents the
+// self-spawn path in startHub() from invoking the test binary with subcommand
+// args, which would trigger recursive test-suite execution.
+func isGoTestBinary(path string) bool {
+	if strings.HasSuffix(path, ".test") || strings.HasSuffix(path, ".test.exe") {
+		return true
+	}
+	// Go test binaries are built into a temp directory named like
+	// /tmp/go-build<number>/b001/<pkg>.test on unix or
+	// C:\Users\...\AppData\Local\Temp\go-build<number>\b001\<pkg>.test.exe
+	// on Windows. The "go-build" segment is stable.
+	return strings.Contains(path, string(os.PathSeparator)+"go-build")
 }
 
 // acquireStartupLock attempts to acquire an exclusive lock for hub startup.
