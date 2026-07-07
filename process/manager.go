@@ -364,12 +364,23 @@ func (pm *ProcessManager) Shutdown(ctx context.Context) error {
 		case <-done:
 		case <-ctx.Done():
 			shutdownErr = ctx.Err()
+			pm.processes.Range(func(key, value any) bool {
+				proc := value.(*ManagedProcess)
+				if proc.IsRunning() {
+					_ = pm.forceKill(proc)
+				}
+				return true
+			})
+			<-done
 		}
 
 		pm.wg.Wait()
 
-		if len(errs) > 0 {
-			shutdownErr = errors.Join(errs...)
+		errMu.Lock()
+		joinedErr := errors.Join(errs...)
+		errMu.Unlock()
+		if joinedErr != nil {
+			shutdownErr = joinedErr
 		}
 	})
 
@@ -421,14 +432,18 @@ func (pm *ProcessManager) StopByProjectPath(ctx context.Context, projectPath str
 				_ = pm.forceKill(proc)
 			}
 		}
+		<-done
 	}
 
 	for _, proc := range toStop {
 		pm.RemoveByPath(proc.ID, proc.ProjectPath)
 	}
 
-	if len(errs) > 0 {
-		return stoppedIDs, errors.Join(errs...)
+	errMu.Lock()
+	joinedErr := errors.Join(errs...)
+	errMu.Unlock()
+	if joinedErr != nil {
+		return stoppedIDs, joinedErr
 	}
 	return stoppedIDs, nil
 }
@@ -474,14 +489,18 @@ func (pm *ProcessManager) StopAll(ctx context.Context) error {
 				_ = pm.forceKill(proc)
 			}
 		}
+		<-done
 	}
 
 	for _, proc := range toStop {
 		pm.RemoveByPath(proc.ID, proc.ProjectPath)
 	}
 
-	if len(errs) > 0 {
-		return errors.Join(errs...)
+	errMu.Lock()
+	joinedErr := errors.Join(errs...)
+	errMu.Unlock()
+	if joinedErr != nil {
+		return joinedErr
 	}
 	return nil
 }
