@@ -347,6 +347,16 @@ func TestRequestBuilder(t *testing.T) {
 		}
 	})
 
+	t.Run("Bytes rejects OK response", func(t *testing.T) {
+		_, err := c.Request("TEST", "OK").Bytes()
+		if err == nil {
+			t.Fatal("Bytes() should reject a non-data response")
+		}
+		if want := "expected data response"; !strings.Contains(err.Error(), want) {
+			t.Fatalf("Bytes() error = %v, want message containing %q", err, want)
+		}
+	})
+
 	t.Run("Chunked response", func(t *testing.T) {
 		data, err := c.Request("TEST", "CHUNKED").Chunked()
 		if err != nil {

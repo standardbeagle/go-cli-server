@@ -505,6 +505,9 @@ func (r *RequestBuilder) Bytes() ([]byte, error) {
 	if resp.Type == protocol.ResponseErr {
 		return nil, fmt.Errorf("%w: [%s] %s", ErrServerError, resp.Code, resp.Message)
 	}
+	if resp.Type != protocol.ResponseJSON && resp.Type != protocol.ResponseData {
+		return nil, fmt.Errorf("expected data response, got %s", resp.Type)
+	}
 
 	return resp.Data, nil
 }
