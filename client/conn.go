@@ -426,6 +426,9 @@ func (r *RequestBuilder) OK() error {
 	if resp.Type == protocol.ResponseErr {
 		return fmt.Errorf("%w: [%s] %s", ErrServerError, resp.Code, resp.Message)
 	}
+	if resp.Type != protocol.ResponseOK {
+		return fmt.Errorf("expected OK response, got %s", resp.Type)
+	}
 
 	return nil
 }

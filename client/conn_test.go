@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -293,6 +294,16 @@ func TestRequestBuilder(t *testing.T) {
 		}
 		if !errors.Is(err, ErrServerError) {
 			t.Errorf("Error should wrap ErrServerError, got %v", err)
+		}
+	})
+
+	t.Run("OK rejects JSON response", func(t *testing.T) {
+		err := c.Request("TEST", "JSON").OK()
+		if err == nil {
+			t.Fatal("OK() should reject a non-OK response")
+		}
+		if want := "expected OK response"; !strings.Contains(err.Error(), want) {
+			t.Fatalf("OK() error = %v, want message containing %q", err, want)
 		}
 	})
 
