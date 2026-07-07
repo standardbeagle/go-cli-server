@@ -30,7 +30,7 @@ type Config struct {
 	Path string
 	// Mode is the socket file permissions (default 0600).
 	Mode os.FileMode
-	// Name is the socket name prefix for default path (default "mcp-hub").
+	// Name is the socket name prefix for default path.
 	Name string
 	// ProcessMatcher is an optional function to detect if a PID belongs to this hub.
 	// If nil, a simple cmdline check is performed.
@@ -40,9 +40,9 @@ type Config struct {
 // DefaultConfig returns the default socket configuration.
 func DefaultConfig() Config {
 	return Config{
-		Path: DefaultSocketPath("mcp-hub"),
+		Path: DefaultSocketPath(DefaultSocketName),
 		Mode: 0600,
-		Name: "mcp-hub",
+		Name: DefaultSocketName,
 	}
 }
 
@@ -51,7 +51,45 @@ func DefaultSocketPath(name string) string {
 	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
 		return filepath.Join(dir, name+".sock")
 	}
-	return fmt.Sprintf("/tmp/%s-%d.sock", name, os.Getuid())
+	// Fallback: nest the socket inside a per-uid directory rather than a bare
+	// /tmp/<name>-<uid>.sock. /tmp is world-writable and sticky, so any local user
+	// could pre-create that bare path and squat it (permanent DoS) or impersonate
+	// the hub. A 0700 uid-owned directory — enforced at bind time by
+	// secureSocketDir — closes that vector.
+	return fmt.Sprintf("/tmp/%s-%d/%s.sock", name, os.Getuid(), name)
+}
+
+// secureSocketDir creates (or validates) the directory that will hold the socket
+// so a local attacker cannot pre-create a world/group-accessible or
+// foreign-owned directory and intercept connections to a command-executing hub.
+func secureSocketDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("failed to create socket directory: %w", err)
+	}
+
+	// Lstat (not Stat) so a symlink planted at the path is caught rather than
+	// silently followed to an attacker-controlled target.
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("failed to stat socket directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("socket directory %s is a symlink; refusing to use it", dir)
+	}
+
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if ok {
+		if int(st.Uid) != os.Getuid() {
+			return fmt.Errorf("socket directory %s is owned by uid %d, not %d", dir, st.Uid, os.Getuid())
+		}
+		// Reject group/other access. If we own it, tighten it back to 0700.
+		if info.Mode().Perm()&0o077 != 0 {
+			if err := os.Chmod(dir, 0o700); err != nil {
+				return fmt.Errorf("socket directory %s is group/other-accessible and could not be tightened: %w", dir, err)
+			}
+		}
+	}
+	return nil
 }
 
 // Manager handles Unix socket lifecycle.
@@ -60,6 +98,10 @@ type Manager struct {
 	listener       net.Listener
 	pidFile        string
 	processMatcher func(pid int) bool
+	// owned is true only after this manager successfully bound the socket and
+	// wrote its PID file. Close removes the socket/pid files only when owned, so a
+	// second hub that got ErrDaemonRunning cannot unlink the live daemon's files.
+	owned bool
 }
 
 // NewManager creates a new socket manager.
@@ -67,7 +109,7 @@ func NewManager(config Config) *Manager {
 	if config.Path == "" {
 		name := config.Name
 		if name == "" {
-			name = "mcp-hub"
+			name = DefaultSocketName
 		}
 		config.Path = DefaultSocketPath(name)
 	}
@@ -93,11 +135,16 @@ func (sm *Manager) Listen() (net.Listener, error) {
 	}
 
 	dir := filepath.Dir(sm.config.Path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create socket directory: %w", err)
+	if err := secureSocketDir(dir); err != nil {
+		return nil, err
 	}
 
+	// Bind under a restrictive umask so the socket is created 0600 atomically.
+	// RUN executes arbitrary commands, so a world-connectable socket — even for the
+	// brief window between Listen and Chmod — is a local-privilege hole.
+	oldMask := syscall.Umask(0o177)
 	listener, err := net.Listen("unix", sm.config.Path)
+	syscall.Umask(oldMask)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create socket: %w", err)
 	}
@@ -115,6 +162,7 @@ func (sm *Manager) Listen() (net.Listener, error) {
 	}
 
 	sm.listener = listener
+	sm.owned = true
 	return listener, nil
 }
 
@@ -130,6 +178,17 @@ func (sm *Manager) Close() error {
 		}
 		sm.listener = nil
 	}
+
+	// Only unlink the socket/pid files if we actually own them. A manager that
+	// never bound (e.g. lost the race and got ErrDaemonRunning) must not delete
+	// the live daemon's files.
+	if !sm.owned {
+		if len(errs) > 0 {
+			return errors.Join(errs...)
+		}
+		return nil
+	}
+	sm.owned = false
 
 	if err := os.Remove(sm.config.Path); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("remove socket: %w", err))
@@ -178,8 +237,16 @@ func (sm *Manager) checkExisting() error {
 
 	conn, err := net.DialTimeout("unix", sm.config.Path, 500*time.Millisecond)
 	if err != nil {
-		if killErr := syscall.Kill(pid, syscall.SIGKILL); killErr == nil {
-			time.Sleep(100 * time.Millisecond)
+		// Process is alive but the socket is unresponsive. Only terminate it if we
+		// can positively tie the PID to THIS socket path — a bare "hub"/"mcp"/
+		// "daemon" cmdline match also catches the hub CLI, github-desktop, etc.
+		// Then SIGTERM first and escalate to SIGKILL only if it lingers.
+		if sm.processReferencesSocket(pid) {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+			if !waitForExit(pid, 2*time.Second) {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				time.Sleep(100 * time.Millisecond)
+			}
 		}
 		os.Remove(sm.pidFile)
 		return nil
@@ -187,6 +254,32 @@ func (sm *Manager) checkExisting() error {
 	conn.Close()
 
 	return ErrDaemonRunning
+}
+
+// processReferencesSocket reports whether pid can be positively identified as
+// our daemon. A caller-supplied matcher is authoritative; otherwise we require
+// this socket path to appear in the process command line. Never guesses "true".
+func (sm *Manager) processReferencesSocket(pid int) bool {
+	if sm.processMatcher != nil {
+		return sm.processMatcher(pid)
+	}
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(cmdline), sm.config.Path)
+}
+
+// waitForExit polls until pid is gone or the timeout elapses.
+func waitForExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !isProcessRunning(pid) {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return !isProcessRunning(pid)
 }
 
 // isOurDaemonProcess checks if the PID belongs to this hub.
@@ -233,7 +326,7 @@ func (sm *Manager) writePIDFile() error {
 // Connect attempts to connect to an existing socket.
 func Connect(path string) (net.Conn, error) {
 	if path == "" {
-		path = DefaultSocketPath("mcp-hub")
+		path = DefaultSocketPath(DefaultSocketName)
 	}
 
 	conn, err := net.Dial("unix", path)
@@ -250,7 +343,7 @@ func Connect(path string) (net.Conn, error) {
 // IsRunning checks if a daemon is running at the given path.
 func IsRunning(path string) bool {
 	if path == "" {
-		path = DefaultSocketPath("mcp-hub")
+		path = DefaultSocketPath(DefaultSocketName)
 	}
 
 	conn, err := net.DialTimeout("unix", path, 100*1e6)
@@ -282,6 +375,17 @@ func isDaemonProcess(pid int) bool {
 func CleanupZombieDaemons(socketPath string, processMatcher func(pid int) bool) int {
 	cleaned := 0
 
+	// The pid file is the authoritative record of which process is the daemon.
+	// When it exists, restrict cleanup to exactly that PID so a hubctl client whose
+	// cmdline merely contains the socket path (and matches the loose "hub"/"mcp"
+	// name heuristic) is never mistaken for a zombie daemon and killed.
+	daemonPID := -1
+	if data, err := os.ReadFile(socketPath + ".pid"); err == nil {
+		if p, perr := strconv.Atoi(strings.TrimSpace(string(data))); perr == nil {
+			daemonPID = p
+		}
+	}
+
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return 0
@@ -298,6 +402,11 @@ func CleanupZombieDaemons(socketPath string, processMatcher func(pid int) bool) 
 		}
 
 		if pid == os.Getpid() {
+			continue
+		}
+
+		// If we know the authoritative daemon PID, only that process is eligible.
+		if daemonPID != -1 && pid != daemonPID {
 			continue
 		}
 
@@ -326,6 +435,13 @@ func CleanupZombieDaemons(socketPath string, processMatcher func(pid int) bool) 
 			continue
 		}
 
+		// This PID is confirmed to reference our socket path. SIGTERM first, then
+		// SIGKILL only if it does not exit.
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+		if waitForExit(pid, 1*time.Second) {
+			cleaned++
+			continue
+		}
 		if err := syscall.Kill(pid, syscall.SIGKILL); err == nil {
 			cleaned++
 		}

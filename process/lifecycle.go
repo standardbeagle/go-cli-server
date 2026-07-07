@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -42,6 +43,25 @@ func (pm *ProcessManager) Start(ctx context.Context, proc *ManagedProcess) error
 	// Set platform-specific process attributes
 	setProcAttr(proc.cmd)
 
+	// On context cancellation (run-timeout or manual Cancel), do a GRACEFUL group
+	// stop instead of the exec default (immediate SIGKILL of the root only). The
+	// hook snapshots the descendant tree while it is still intact — after the root
+	// is reaped the /proc PPID chain is gone and grandchildren (e.g. dotnet
+	// watch → app) would be un-findable, left orphaned holding ports. WaitDelay
+	// then escalates to SIGKILL if the group does not exit in time.
+	gracefulTimeout := pm.config.GracefulTimeout
+	if gracefulTimeout == 0 {
+		gracefulTimeout = 5 * time.Second
+	}
+	proc.cmd.WaitDelay = gracefulTimeout
+	proc.cmd.Cancel = func() error {
+		pm.snapshotDescendants(proc)
+		if proc.cmd.Process != nil {
+			return pm.signalProcessGroup(proc.cmd.Process.Pid, syscall.SIGTERM)
+		}
+		return nil
+	}
+
 	// Connect output streams to ring buffers, optionally wrapping with line callbacks
 	if proc.outputCallback != nil {
 		proc.stdoutLineWriter = newLineWriter(proc.stdout, proc.ID, proc.outputCallback)
@@ -57,8 +77,7 @@ func (pm *ProcessManager) Start(ctx context.Context, proc *ManagedProcess) error
 	if proc.stdinEnabled {
 		stdinPipe, err := proc.cmd.StdinPipe()
 		if err != nil {
-			proc.SetState(StateFailed)
-			pm.IncrementFailed()
+			pm.failStart(proc)
 			return fmt.Errorf("failed to create stdin pipe for %s: %w", proc.ID, err)
 		}
 		proc.stdin = stdinPipe
@@ -66,8 +85,7 @@ func (pm *ProcessManager) Start(ctx context.Context, proc *ManagedProcess) error
 
 	// Start the process
 	if err := proc.cmd.Start(); err != nil {
-		proc.SetState(StateFailed)
-		pm.IncrementFailed()
+		pm.failStart(proc)
 		return fmt.Errorf("failed to start process %s: %w", proc.ID, err)
 	}
 
@@ -102,6 +120,16 @@ func (pm *ProcessManager) Start(ctx context.Context, proc *ManagedProcess) error
 	return nil
 }
 
+func (pm *ProcessManager) failStart(proc *ManagedProcess) {
+	proc.SetState(StateFailed)
+	pm.IncrementFailed()
+	pm.RemoveByPath(proc.ID, proc.ProjectPath)
+	if proc.cancel != nil {
+		proc.cancel()
+	}
+	close(proc.done)
+}
+
 // waitForProcess monitors the process until it exits.
 func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 	defer pm.wg.Done()
@@ -114,29 +142,35 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 		pgid = proc.cmd.Process.Pid
 	}
 
-	// Look up stored descendants before Wait (while PM state is still valid)
-	var storedDescendants []int
-	if dt, ok := pm.pidTracker.(DescendantTracker); ok {
-		storedDescendants = dt.GetDescendants(proc.PID())
-	}
-
 	err := proc.cmd.Wait()
-
-	// Kill any surviving children in the process group. cmd.Wait only waits
-	// for the direct child — grandchildren (e.g. dotnet watch → bifrostui)
-	// can survive as orphans. Signaling a dead/empty group is a no-op.
-	if pgid > 0 {
-		cleanupProcessGroup(pgid)
+	waitDelay := errors.Is(err, exec.ErrWaitDelay)
+	if waitDelay {
+		err = nil
 	}
 
-	// Kill stored descendants from the tracker (catches reparented grandchildren
-	// after the parent died) — but ONLY on an abnormal/killed exit. These are
-	// bare PIDs from a snapshot up to a scan-interval old; SIGKILLing them after
-	// a clean voluntary exit races the kernel recycling those PIDs into
-	// unrelated processes. A clean exit means the process managed its own
-	// lifetime; anything it deliberately left running is not ours to reap here.
+	// Gather the descendant set from snapshots taken while the tree was still
+	// intact: the cmd.Cancel hook (timeout/manual-cancel path) and StopProcess
+	// (explicit stop) both populate proc.Descendants(); the background tracker,
+	// if any, contributes its last scan. Read AFTER Wait so the Cancel hook's
+	// snapshot is visible — after Wait the /proc chain is gone, so a live walk
+	// here would find nothing.
+	descendants := proc.Descendants()
+	if dt, ok := pm.pidTracker.(DescendantTracker); ok {
+		descendants = append(descendants, dt.GetDescendants(proc.PID())...)
+	}
+
+	// Kill any surviving children — but ONLY on an abnormal/killed exit. The
+	// group kill and the snapshotted-descendant kill both race the kernel
+	// recycling the reaped root's PID (== PGID) into an unrelated group leader:
+	// kill(-pgid, SIGKILL) would then murder an innocent process tree. cmd.Wait
+	// has already reaped the root, so the guard that restricted descendant kills
+	// to abnormal exits must cover the group kill too. A clean exit means the
+	// process managed its own lifetime; its group is already empty.
 	if err != nil {
-		killStoredDescendants(storedDescendants)
+		if pgid > 0 {
+			cleanupProcessGroup(pgid)
+		}
+		killStoredDescendants(descendants)
 	}
 
 	// Cleanup platform-specific resources
@@ -205,6 +239,14 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 		_ = pm.pidTracker.Remove(proc.ID, proc.ProjectPath)
 	}
 
+	// Release the process context now that it is reaped. On the graceful stop path
+	// StopProcess no longer cancels it (that would SIGKILL early), so cancel here
+	// to avoid leaking the context's goroutine. Wait has already returned, so
+	// os/exec's watcher is gone and this will not fire the cmd.Cancel hook.
+	if proc.cancel != nil {
+		proc.cancel()
+	}
+
 	close(proc.done)
 }
 
@@ -261,21 +303,28 @@ func (pm *ProcessManager) StopProcess(ctx context.Context, proc *ManagedProcess)
 			ErrInvalidState, proc.ID, proc.State())
 	}
 
-	// Snapshot descendants BEFORE cancelling the process context. Cancelling
-	// causes the exec.CommandContext watcher to SIGKILL the root PID, which
-	// reparents every descendant to init and breaks any post-cancel PPID walk.
+	// Snapshot descendants while the tree is still intact (before any kill).
 	pm.snapshotDescendants(proc)
 
-	proc.Cancel()
-
+	// Honor an already-cancelled caller context.
 	select {
 	case <-ctx.Done():
 		return pm.forceKill(proc)
 	default:
 	}
 
+	// Graceful stop: SIGTERM the whole group first. Do NOT proc.Cancel() here —
+	// exec.CommandContext's cancel path escalates immediately, which previously
+	// SIGKILLed the root before SIGTERM could ever be honored, making
+	// GracefulTimeout an illusion. Cancellation is deferred to forceKill.
+	//
+	// If the graceful signal cannot be delivered (Windows with no console attached,
+	// where CTRL_BREAK fails; or a group that is already gone), escalate now instead
+	// of idling the full GracefulTimeout waiting for a signal the process never got.
 	if proc.cmd != nil && proc.cmd.Process != nil {
-		_ = pm.signalProcessGroup(proc.cmd.Process.Pid, syscall.SIGTERM)
+		if gerr := pm.signalProcessGroup(proc.cmd.Process.Pid, syscall.SIGTERM); gerr != nil {
+			return pm.forceKill(proc)
+		}
 	}
 
 	gracefulTimeout := pm.config.GracefulTimeout
@@ -298,9 +347,22 @@ func (pm *ProcessManager) forceKill(proc *ManagedProcess) error {
 	if proc.cmd == nil || proc.cmd.Process == nil {
 		return nil
 	}
+	for {
+		state := proc.State()
+		if state == StateStopping || state == StateStopped || state == StateFailed {
+			break
+		}
+		if proc.CompareAndSwapState(state, StateStopping) {
+			break
+		}
+	}
 
-	if err := pm.signalProcessGroup(proc.cmd.Process.Pid, syscall.SIGKILL); err != nil {
-		return fmt.Errorf("failed to force kill process %s: %w", proc.ID, err)
+	// Escalation: SIGKILL the whole group, then cancel the exec context so the
+	// runtime's own killer fires and pipes/resources are released.
+	killErr := pm.signalProcessGroup(proc.cmd.Process.Pid, syscall.SIGKILL)
+	proc.Cancel()
+	if killErr != nil {
+		return fmt.Errorf("failed to force kill process %s: %w", proc.ID, killErr)
 	}
 
 	select {
@@ -432,6 +494,7 @@ func (pm *ProcessManager) RunSync(ctx context.Context, cfg ProcessConfig) (int, 
 	if err != nil {
 		return -1, err
 	}
+	defer pm.RemoveByPath(proc.ID, proc.ProjectPath)
 
 	select {
 	case <-proc.done:

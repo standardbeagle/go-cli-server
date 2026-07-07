@@ -31,7 +31,7 @@ import (
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/hub"
-	"github.com/standardbeagle/go-cli-server/process"
+	"github.com/standardbeagle/go-cli-server/socket"
 )
 
 var (
@@ -42,7 +42,7 @@ var (
 func main() {
 	// Parse flags
 	socketPath := flag.String("socket", "", "Unix socket path (default: auto-generated)")
-	socketName := flag.String("name", "go-cli-server", "Socket name for auto-generated path")
+	socketName := flag.String("name", socket.DefaultSocketName, "Socket name for auto-generated path")
 	maxClients := flag.Int("max-clients", 0, "Maximum concurrent clients (0 = unlimited)")
 	enableProc := flag.Bool("enable-proc", true, "Enable process management commands")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging")
@@ -61,15 +61,15 @@ func main() {
 		log.SetFlags(log.LstdFlags)
 	}
 
-	// Create hub configuration
-	config := hub.Config{
-		SocketPath:        *socketPath,
-		SocketName:        *socketName,
-		MaxClients:        *maxClients,
-		EnableProcessMgmt: *enableProc,
-		Version:           version,
-		ProcessConfig:     process.DefaultManagerConfig(),
-	}
+	// Start from DefaultConfig so sane defaults (notably WriteTimeout, without
+	// which a slow-loris client wedges its connection goroutine forever) are
+	// applied, then override with flags.
+	config := hub.DefaultConfig()
+	config.SocketPath = *socketPath
+	config.SocketName = *socketName
+	config.MaxClients = *maxClients
+	config.EnableProcessMgmt = *enableProc
+	config.Version = version
 
 	// Create and start hub
 	h := hub.New(config)

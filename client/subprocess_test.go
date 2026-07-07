@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,6 +41,67 @@ func TestSubprocessServer_StartStop(t *testing.T) {
 	if err := server.Stop(ctx); err != nil {
 		t.Errorf("Stop failed: %v", err)
 	}
+}
+
+// TestSubprocessServer_Restart verifies a server can be restarted after Stop
+// (the shutdown channel must be reinstated, not left closed).
+func TestSubprocessServer_Restart(t *testing.T) {
+	tmpDir := t.TempDir()
+	sockPath := filepath.Join(tmpDir, "restart.sock")
+
+	server := NewSubprocessServer(SubprocessServerConfig{
+		ID:        "restart",
+		Transport: TransportConfig{Type: "unix", Address: sockPath},
+	})
+
+	for i := 0; i < 3; i++ {
+		if err := server.Start(); err != nil {
+			t.Fatalf("Start #%d failed: %v", i, err)
+		}
+		// A live epoch must accept a connection.
+		conn, err := net.DialTimeout("unix", sockPath, time.Second)
+		if err != nil {
+			t.Fatalf("dial after Start #%d: %v", i, err)
+		}
+		conn.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := server.Stop(ctx); err != nil {
+			t.Errorf("Stop #%d failed: %v", i, err)
+		}
+		cancel()
+	}
+}
+
+// TestSubprocessServer_ConcurrentStartStop hammers Start/Stop concurrently to
+// surface epoch-swap races (double-close panic, listener mis-close, wg reuse)
+// under the race detector.
+func TestSubprocessServer_ConcurrentStartStop(t *testing.T) {
+	tmpDir := t.TempDir()
+	sockPath := filepath.Join(tmpDir, "concurrent.sock")
+
+	server := NewSubprocessServer(SubprocessServerConfig{
+		ID:        "concurrent",
+		Transport: TransportConfig{Type: "unix", Address: sockPath},
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); _ = server.Start() }()
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_ = server.Stop(ctx)
+		}()
+	}
+	wg.Wait()
+
+	// Leave it stopped.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = server.Stop(ctx)
 }
 
 func TestSubprocessServer_HandleCommand(t *testing.T) {

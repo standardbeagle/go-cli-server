@@ -209,7 +209,11 @@ func (m *StateManager) loadStateLocked(statePath string) (*PersistedState, error
 
 	var state PersistedState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("failed to parse state: %w", err)
+		// A corrupt/truncated file would otherwise fail every future SaveTask,
+		// silently killing persistence (all tasks dropped on restart). Preserve
+		// the bytes for diagnosis and start from empty state so saves resume.
+		_ = os.Rename(statePath, statePath+".corrupt")
+		return &PersistedState{Version: 1}, nil
 	}
 
 	return &state, nil
@@ -224,10 +228,26 @@ func (m *StateManager) saveStateLocked(statePath string, state *PersistedState) 
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	// Write atomically via temp file
+	// Write atomically via temp file, fsyncing before rename so a crash cannot
+	// leave a renamed-but-empty file (which would drop all tasks on restart).
 	tmpPath := statePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open temp state file: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
 		return fmt.Errorf("failed to write state file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to fsync state file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to close state file: %w", err)
 	}
 
 	if err := os.Rename(tmpPath, statePath); err != nil {

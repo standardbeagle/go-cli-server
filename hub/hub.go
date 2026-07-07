@@ -4,7 +4,6 @@ package hub
 
 import (
 	"context"
-	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -37,7 +36,7 @@ type Config struct {
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		SocketName:        "mcp-hub",
+		SocketName:        socket.DefaultSocketName,
 		MaxClients:        0,
 		ReadTimeout:       0,
 		WriteTimeout:      5 * time.Second,
@@ -69,9 +68,6 @@ type Hub struct {
 	clientCount atomic.Int64
 	nextID      atomic.Int64
 
-	// External process registry for message relay
-	externalProcs sync.Map // processID -> *ExternalProcess
-
 	// Session registry
 	sessions sync.Map // sessionCode -> *Session
 
@@ -92,7 +88,7 @@ type Hub struct {
 // New creates a new Hub with the given configuration.
 func New(config Config) *Hub {
 	if config.SocketName == "" {
-		config.SocketName = "mcp-hub"
+		config.SocketName = socket.DefaultSocketName
 	}
 
 	sockConfig := socket.Config{
@@ -155,24 +151,6 @@ func (h *Hub) registerBuiltinCommands() {
 		})
 	}
 
-	// RELAY command for message relay
-	_ = h.commands.Register(CommandDefinition{
-		Verb:     "RELAY",
-		SubVerbs: []string{"SEND", "BROADCAST", "REQUEST"},
-		Handler:  h.handleRelay,
-	})
-
-	// ATTACH/DETACH for external processes
-	_ = h.commands.Register(CommandDefinition{
-		Verb:    "ATTACH",
-		Handler: h.handleAttach,
-	})
-
-	_ = h.commands.Register(CommandDefinition{
-		Verb:    "DETACH",
-		Handler: h.handleDetach,
-	})
-
 	// SESSION command
 	_ = h.commands.Register(CommandDefinition{
 		Verb:     "SESSION",
@@ -228,6 +206,13 @@ func (h *Hub) Stop(ctx context.Context) error {
 		return true
 	})
 
+	// Stop all subprocesses (stdio children + health-check goroutines) before the
+	// process manager. Nothing else calls StopAll, so without this hub shutdown
+	// orphans every stdio child and leaks its health loop.
+	if h.subRouter != nil {
+		_ = h.subRouter.StopAll(ctx)
+	}
+
 	// Shutdown ProcessManager if enabled
 	if h.pm != nil {
 		_ = h.pm.Shutdown(ctx)
@@ -268,7 +253,15 @@ func (h *Hub) acceptLoop() {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
 			}
-			// Fatal error or listener closed
+			// Fatal error (e.g. fd exhaustion) with no shutdown in progress: the
+			// accept loop can no longer serve, and simply returning would leave a
+			// zombie hub still holding the socket path (blocking restarts, and
+			// squattable). Drive a full shutdown so the socket/pid files are
+			// released. Stop is idempotent and waits on this goroutine's wg slot,
+			// which we release by returning immediately.
+			if !h.shutdown.Load() {
+				go h.Stop(context.Background())
+			}
 			return
 		}
 
@@ -335,8 +328,8 @@ func (h *Hub) RegisterSession(code, projectPath string) {
 		Code:        code,
 		ProjectPath: projectPath,
 		StartedAt:   time.Now(),
-		LastSeen:    time.Now(),
 	}
+	session.SetLastSeen(time.Now())
 	h.sessions.Store(code, session)
 }
 
@@ -362,65 +355,15 @@ type Session struct {
 	Command     string
 	Args        []string
 	StartedAt   time.Time
-	LastSeen    time.Time
+
+	// lastSeen holds the heartbeat time as UnixNano. It is written by heartbeats
+	// and read concurrently by SESSION LIST/GET, so it must be accessed atomically
+	// rather than as a plain time.Time field.
+	lastSeen atomic.Int64
 }
 
-// ExternalProcess represents an external process connected for message relay.
-type ExternalProcess struct {
-	ID          string
-	ProjectPath string
-	Connection  net.Conn
-	Labels      map[string]string
-	Inbox       chan *Message
-}
+// SetLastSeen atomically records the session's last-seen time.
+func (s *Session) SetLastSeen(t time.Time) { s.lastSeen.Store(t.UnixNano()) }
 
-// Message represents a message for relay between processes.
-type Message struct {
-	ID        string    `json:"id,omitempty"`
-	From      string    `json:"from"`
-	To        string    `json:"to"`
-	Type      string    `json:"type"`
-	Data      []byte    `json:"data,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-// RegisterExternalProcess registers an external process for message relay.
-func (h *Hub) RegisterExternalProcess(proc *ExternalProcess) error {
-	if proc.ID == "" {
-		return errors.New("process ID is required")
-	}
-
-	_, loaded := h.externalProcs.LoadOrStore(proc.ID, proc)
-	if loaded {
-		return errors.New("process already registered")
-	}
-
-	return nil
-}
-
-// UnregisterExternalProcess removes an external process.
-func (h *Hub) UnregisterExternalProcess(id string) {
-	h.externalProcs.Delete(id)
-}
-
-// GetExternalProcess retrieves an external process by ID.
-func (h *Hub) GetExternalProcess(id string) (*ExternalProcess, bool) {
-	val, ok := h.externalProcs.Load(id)
-	if !ok {
-		return nil, false
-	}
-	return val.(*ExternalProcess), true
-}
-
-// BroadcastToExternal sends a message to all external processes.
-func (h *Hub) BroadcastToExternal(msg *Message) {
-	h.externalProcs.Range(func(key, value any) bool {
-		proc := value.(*ExternalProcess)
-		select {
-		case proc.Inbox <- msg:
-		default:
-			// Inbox full, skip
-		}
-		return true
-	})
-}
+// LastSeen atomically returns the session's last-seen time.
+func (s *Session) LastSeen() time.Time { return time.Unix(0, s.lastSeen.Load()) }

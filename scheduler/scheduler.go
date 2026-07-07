@@ -7,6 +7,8 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,20 +39,30 @@ type Task struct {
 	Status      TaskStatus `json:"status"`               // Current status
 	Attempts    int        `json:"attempts"`             // Delivery attempts
 	LastError   string     `json:"last_error,omitempty"` // Last delivery error
+
+	// mu guards the mutable fields above during delivery. delivering marks a task
+	// whose delivery goroutine is in flight, so a tick does not re-dispatch it.
+	// Both are unexported and therefore ignored by JSON (de)serialization.
+	mu         sync.Mutex `json:"-"`
+	delivering bool       `json:"-"`
 }
 
-// ToMap returns the task as a map for JSON serialization.
-func (t *Task) ToMap() map[string]interface{} {
-	return map[string]interface{}{
-		"id":           t.ID,
-		"target_id":    t.TargetID,
-		"payload":      t.Payload,
-		"deliver_at":   t.DeliverAt.Format(time.RFC3339),
-		"created_at":   t.CreatedAt.Format(time.RFC3339),
-		"project_path": t.ProjectPath,
-		"status":       string(t.Status),
-		"attempts":     t.Attempts,
-		"last_error":   t.LastError,
+// clone returns a detached snapshot of the task, taken under its lock, so callers
+// can read a consistent set of fields without racing the delivery goroutine.
+// The returned copy has a fresh zero mutex and is never mutated by the scheduler.
+func (t *Task) clone() *Task {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return &Task{
+		ID:          t.ID,
+		TargetID:    t.TargetID,
+		Payload:     t.Payload,
+		DeliverAt:   t.DeliverAt,
+		CreatedAt:   t.CreatedAt,
+		ProjectPath: t.ProjectPath,
+		Status:      t.Status,
+		Attempts:    t.Attempts,
+		LastError:   t.LastError,
 	}
 }
 
@@ -84,6 +96,10 @@ type Config struct {
 	ValidateTarget ValidateTargetFunc
 	// StateManager handles task persistence (optional).
 	StateManager *StateManager
+	// StateScanPaths lists project directories to scan for persisted task state
+	// at startup. Without them a fresh StateManager has no record of which
+	// projects hold state, so nothing would be restored on restart.
+	StateScanPaths []string
 }
 
 // DefaultConfig returns sensible defaults (DeliverFunc must still be set).
@@ -157,13 +173,27 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.started = true
 
-	// Load persisted tasks if state manager is configured
+	// Load persisted tasks if state manager is configured.
 	if s.config.StateManager != nil {
+		// Discover which project directories hold persisted state before loading;
+		// otherwise a fresh StateManager knows of no projects and restores nothing.
+		if len(s.config.StateScanPaths) > 0 {
+			s.config.StateManager.ScanForProjects(s.config.StateScanPaths)
+		}
+		var maxID int64
 		tasks := s.config.StateManager.LoadAllTasks()
 		for _, task := range tasks {
+			// Track the highest ID seen so new task IDs don't collide with (and
+			// overwrite) persisted tasks after a restart.
+			if n, ok := parseTaskIDNum(task.ID); ok && n > maxID {
+				maxID = n
+			}
 			if task.Status == TaskStatusPending {
 				s.tasks.Store(task.ID, task)
 			}
+		}
+		if maxID > s.nextTaskID.Load() {
+			s.nextTaskID.Store(maxID)
 		}
 	}
 
@@ -207,55 +237,128 @@ func (s *Scheduler) run() {
 	}
 }
 
-// checkDueTasks checks for and delivers due tasks.
+// checkDueTasks checks for and delivers due tasks. A task already being
+// delivered is skipped so a slow delivery is not re-dispatched every tick.
 func (s *Scheduler) checkDueTasks() {
 	now := time.Now()
 	s.tasks.Range(func(key, value interface{}) bool {
 		task := value.(*Task)
-		if task.Status == TaskStatusPending && task.DeliverAt.Before(now) {
-			// Attempt delivery in a goroutine
+		task.mu.Lock()
+		due := task.Status == TaskStatusPending && !task.delivering && task.DeliverAt.Before(now)
+		if due {
+			task.delivering = true
+		}
+		task.mu.Unlock()
+		if due {
+			// Track the delivery goroutine on the WaitGroup so Stop() waits for
+			// in-flight deliveries to finish instead of returning while they still
+			// write task state — which, across a Stop→Start cycle, could double
+			// deliver. Safe to Add here: this runs from run(), whose own wg count is
+			// still held, so the counter cannot be at zero concurrently with Wait.
+			s.wg.Add(1)
 			go s.deliverTask(task)
 		}
 		return true
 	})
 }
 
-// deliverTask attempts to deliver a scheduled task.
+// deliverTask attempts to deliver a scheduled task. The caller has already set
+// task.delivering; this function clears it once the attempt resolves.
 func (s *Scheduler) deliverTask(task *Task) {
-	// Create delivery context with timeout
+	defer s.wg.Done()
+
+	// Snapshot immutable delivery inputs under the lock.
+	task.mu.Lock()
+	targetID, payload := task.TargetID, task.Payload
+	task.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(s.ctx, s.config.DeliveryTimeout)
 	defer cancel()
 
-	// Attempt delivery
-	err := s.config.DeliverFunc(ctx, task.TargetID, task.Payload)
+	err := s.config.DeliverFunc(ctx, targetID, payload)
+
+	task.mu.Lock()
+	task.delivering = false
+
+	// Cancelled while this delivery was in flight: respect the cancellation, do
+	// not overwrite the terminal Cancelled status with Delivered/Failed.
+	if task.Status == TaskStatusCancelled {
+		task.mu.Unlock()
+		return
+	}
+
+	// Scheduler shutting down: the delivery ctx was cancelled out from under us,
+	// so a failure here is not a real delivery failure. Leave the task Pending
+	// (don't burn an attempt) so a future Start retries it.
+	if err != nil && s.ctx.Err() != nil {
+		task.mu.Unlock()
+		s.persistTask(task)
+		return
+	}
+
 	if err != nil {
 		task.Attempts++
 		task.LastError = err.Error()
 
 		if task.Attempts >= s.config.MaxRetries {
 			task.Status = TaskStatusFailed
+			task.mu.Unlock()
 			s.totalFailed.Add(1)
 			s.removeTaskFromStorage(task)
-		} else {
-			// Schedule retry with exponential backoff
-			backoff := s.config.RetryDelay * time.Duration(1<<uint(task.Attempts-1))
-			task.DeliverAt = time.Now().Add(backoff)
-			s.persistTask(task)
+			return
 		}
+		// Schedule retry with exponential backoff.
+		backoff := s.config.RetryDelay * time.Duration(1<<uint(task.Attempts-1))
+		task.DeliverAt = time.Now().Add(backoff)
+		task.mu.Unlock()
+		s.persistTask(task)
 		return
 	}
 
 	// Success!
 	task.Status = TaskStatusDelivered
+	task.mu.Unlock()
 	s.totalDelivered.Add(1)
 	s.removeTaskFromStorage(task)
+}
+
+// parseTaskIDNum extracts the numeric suffix of a "task-<n>" ID.
+func parseTaskIDNum(id string) (int64, bool) {
+	const prefix = "task-"
+	if !strings.HasPrefix(id, prefix) {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(id[len(prefix):], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // persistTask saves the task state to persistent storage.
 // Errors are intentionally ignored as persistence is best-effort.
 func (s *Scheduler) persistTask(task *Task) {
 	if s.config.StateManager != nil {
-		_ = s.config.StateManager.SaveTask(task)
+		// Persist a snapshot under the task lock so Cancel cannot remove a task
+		// from storage while a stale retry snapshot writes it back.
+		task.mu.Lock()
+		if task.Status == TaskStatusCancelled || task.Status == TaskStatusDelivered || task.Status == TaskStatusFailed {
+			task.mu.Unlock()
+			return
+		}
+		snapshot := &Task{
+			ID:          task.ID,
+			TargetID:    task.TargetID,
+			Payload:     task.Payload,
+			DeliverAt:   task.DeliverAt,
+			CreatedAt:   task.CreatedAt,
+			ProjectPath: task.ProjectPath,
+			Status:      task.Status,
+			Attempts:    task.Attempts,
+			LastError:   task.LastError,
+		}
+		task.mu.Unlock()
+		_ = s.config.StateManager.SaveTask(snapshot)
 	}
 }
 
@@ -305,7 +408,8 @@ func (s *Scheduler) Schedule(targetID string, duration time.Duration, payload st
 	s.totalScheduled.Add(1)
 	s.persistTask(task)
 
-	return task, nil
+	// Return a snapshot; the stored task is mutated concurrently by delivery.
+	return task.clone(), nil
 }
 
 // Cancel cancels a scheduled task.
@@ -316,11 +420,15 @@ func (s *Scheduler) Cancel(taskID string) error {
 	}
 
 	task := val.(*Task)
+	task.mu.Lock()
 	if task.Status != TaskStatusPending {
-		return fmt.Errorf("task %q is not pending (status: %s)", taskID, task.Status)
+		status := task.Status
+		task.mu.Unlock()
+		return fmt.Errorf("task %q is not pending (status: %s)", taskID, status)
 	}
-
 	task.Status = TaskStatusCancelled
+	task.mu.Unlock()
+
 	s.totalCancelled.Add(1)
 	s.removeTaskFromStorage(task)
 
@@ -333,30 +441,31 @@ func (s *Scheduler) Get(taskID string) (*Task, bool) {
 	if !ok {
 		return nil, false
 	}
-	return val.(*Task), true
+	return val.(*Task).clone(), true
 }
 
-// List returns all tasks, optionally filtered by project path.
+// List returns snapshots of all tasks, optionally filtered by project path.
 func (s *Scheduler) List(projectPath string, global bool) []*Task {
 	var result []*Task
 	s.tasks.Range(func(key, value interface{}) bool {
 		task := value.(*Task)
 		if global || projectPath == "" || task.ProjectPath == projectPath {
-			result = append(result, task)
+			result = append(result, task.clone())
 		}
 		return true
 	})
 	return result
 }
 
-// ListPending returns only pending tasks.
+// ListPending returns snapshots of only pending tasks.
 func (s *Scheduler) ListPending(projectPath string, global bool) []*Task {
 	var result []*Task
 	s.tasks.Range(func(key, value interface{}) bool {
 		task := value.(*Task)
-		if task.Status == TaskStatusPending {
-			if global || projectPath == "" || task.ProjectPath == projectPath {
-				result = append(result, task)
+		snap := task.clone()
+		if snap.Status == TaskStatusPending {
+			if global || projectPath == "" || snap.ProjectPath == projectPath {
+				result = append(result, snap)
 			}
 		}
 		return true
@@ -379,7 +488,10 @@ func (s *Scheduler) Info() Info {
 	var pendingCount int64
 	s.tasks.Range(func(key, value interface{}) bool {
 		task := value.(*Task)
-		if task.Status == TaskStatusPending {
+		task.mu.Lock()
+		pending := task.Status == TaskStatusPending
+		task.mu.Unlock()
+		if pending {
 			pendingCount++
 		}
 		return true

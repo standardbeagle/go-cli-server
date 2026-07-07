@@ -137,6 +137,96 @@ func TestIntegration_SubprocessRegistration(t *testing.T) {
 	}
 }
 
+// TestIntegration_SubprocessRouting tests that a command actually routes through
+// the hub to a registered subprocess and the response comes back to the client.
+func TestIntegration_SubprocessRouting(t *testing.T) {
+	tmpDir := t.TempDir()
+	hubSocket := filepath.Join(tmpDir, "hub.sock")
+	subprocessSocket := filepath.Join(tmpDir, "subprocess.sock")
+
+	h := hub.New(hub.Config{SocketPath: hubSocket})
+	if err := h.Start(); err != nil {
+		t.Fatalf("Failed to start hub: %v", err)
+	}
+	defer func() { _ = h.Stop(context.Background()) }()
+
+	time.Sleep(50 * time.Millisecond)
+
+	subServer := client.NewSubprocessServer(client.SubprocessServerConfig{
+		ID: "route-echo",
+		Transport: client.TransportConfig{
+			Type:    "unix",
+			Address: subprocessSocket,
+		},
+	})
+
+	subServer.RegisterHandler("ECHO", func(ctx context.Context, cmd *protocol.Command) *protocol.Response {
+		resp := map[string]interface{}{
+			"verb":    cmd.Verb,
+			"subverb": cmd.SubVerb,
+			"args":    cmd.Args,
+			"echoed":  true,
+		}
+		data, _ := json.Marshal(resp)
+		return &protocol.Response{Type: protocol.ResponseJSON, Data: data}
+	})
+
+	if err := subServer.Start(); err != nil {
+		t.Fatalf("Failed to start subprocess server: %v", err)
+	}
+	defer func() { _ = subServer.Stop(context.Background()) }()
+
+	// AutoStart makes the hub connect to the subprocess so it becomes Running.
+	regConfig := protocol.SubprocessRegisterConfig{
+		ID:        "route-echo",
+		Name:      "Route Echo",
+		Commands:  []string{"ECHO *"},
+		AutoStart: true,
+		Transport: protocol.SubprocessTransport{
+			Type:    "unix",
+			Address: subprocessSocket,
+		},
+	}
+	if err := client.RegisterWithHub(hubSocket, regConfig); err != nil {
+		t.Fatalf("Failed to register with hub: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	clientConn, err := net.Dial("unix", hubSocket)
+	if err != nil {
+		t.Fatalf("Failed to connect to hub: %v", err)
+	}
+	defer clientConn.Close()
+
+	parser := protocol.NewParser(clientConn)
+	writer := protocol.NewWriter(clientConn)
+
+	// Send a command that must route through the hub to the subprocess.
+	if err := writer.WriteCommandWithSubVerb("ECHO", "HELLO", []string{"world"}, nil); err != nil {
+		t.Fatalf("Failed to send ECHO: %v", err)
+	}
+
+	resp, err := parser.ParseResponse()
+	if err != nil {
+		t.Fatalf("Failed to parse ECHO response: %v", err)
+	}
+	if resp.Type != protocol.ResponseJSON {
+		t.Fatalf("Expected JSON from routed subprocess, got %s (msg=%q)", resp.Type, resp.Message)
+	}
+
+	var echoed map[string]interface{}
+	if err := json.Unmarshal(resp.Data, &echoed); err != nil {
+		t.Fatalf("Failed to unmarshal echo response: %v", err)
+	}
+	if echoed["echoed"] != true {
+		t.Errorf("Command did not route to subprocess: %v", echoed)
+	}
+	if echoed["verb"] != "ECHO" {
+		t.Errorf("Expected verb ECHO, got %v", echoed["verb"])
+	}
+}
+
 // TestIntegration_SubprocessHealthCheck tests that health checks work correctly.
 func TestIntegration_SubprocessHealthCheck(t *testing.T) {
 	tmpDir := t.TempDir()

@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/standardbeagle/go-cli-server/socket"
 )
+
+var errStartupLockHeld = errors.New("startup lock held")
 
 // AutoStartConfig holds configuration for auto-starting the hub.
 type AutoStartConfig struct {
@@ -61,6 +64,12 @@ func NewAutoStartConn(config AutoStartConfig) *AutoStartConn {
 
 // Connect connects to the hub, starting it if necessary.
 func (c *AutoStartConn) Connect() error {
+	// Reject an empty socket path outright: it would derive a relative
+	// ".startup.lock" in the working directory and connect nowhere useful.
+	if c.config.SocketPath == "" {
+		return fmt.Errorf("auto-start requires a non-empty SocketPath")
+	}
+
 	// First, try to connect directly
 	err := c.Conn.EnsureConnected()
 	if err == nil {
@@ -178,23 +187,29 @@ func isGoTestBinary(path string) bool {
 // acquireStartupLock attempts to acquire an exclusive lock for hub startup.
 // Returns the lock file handle on success, or error if lock is held by another process.
 func acquireStartupLock(lockPath string) (*os.File, error) {
-	// Try to create lock file exclusively
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		if os.IsExist(err) {
-			// Lock file exists - check if it's stale (> 30 seconds old)
-			info, statErr := os.Stat(lockPath)
-			if statErr == nil && time.Since(info.ModTime()) > 30*time.Second {
-				// Stale lock, remove and retry
-				os.Remove(lockPath)
-				return acquireStartupLock(lockPath)
-			}
+		return nil, err
+	}
+	if err := lockStartupFile(f); err != nil {
+		f.Close()
+		if errors.Is(err, errStartupLockHeld) {
 			return nil, fmt.Errorf("startup lock held by another process")
 		}
 		return nil, err
 	}
 
 	// Write PID and timestamp
+	if err := f.Truncate(0); err != nil {
+		_ = unlockStartupFile(f)
+		f.Close()
+		return nil, err
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		_ = unlockStartupFile(f)
+		f.Close()
+		return nil, err
+	}
 	fmt.Fprintf(f, "%d\n", os.Getpid())
 	return f, nil
 }
@@ -202,17 +217,31 @@ func acquireStartupLock(lockPath string) (*os.File, error) {
 // releaseStartupLock releases the startup lock.
 func releaseStartupLock(f *os.File, lockPath string) {
 	if f != nil {
+		own, statErr := f.Stat()
+		_ = unlockStartupFile(f)
 		f.Close()
-		os.Remove(lockPath)
+		if statErr == nil {
+			if info, err := os.Stat(lockPath); err == nil && os.SameFile(info, own) {
+				os.Remove(lockPath)
+			}
+		}
 	}
 }
 
 // waitForHub waits for the hub to be ready to accept connections.
 func (c *AutoStartConn) waitForHub() error {
-	ctx, cancel := context.WithTimeout(context.Background(), c.config.StartTimeout)
+	startTimeout := c.config.StartTimeout
+	if startTimeout <= 0 {
+		startTimeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
 	defer cancel()
 
-	ticker := time.NewTicker(c.config.RetryInterval)
+	retryInterval := c.config.RetryInterval
+	if retryInterval <= 0 {
+		retryInterval = 50 * time.Millisecond
+	}
+	ticker := time.NewTicker(retryInterval)
 	defer ticker.Stop()
 
 	retries := 0
@@ -229,7 +258,8 @@ func (c *AutoStartConn) waitForHub() error {
 				return err
 			}
 			retries++
-			if retries >= c.config.MaxRetries {
+			// MaxRetries <= 0 means rely solely on the context timeout.
+			if c.config.MaxRetries > 0 && retries >= c.config.MaxRetries {
 				return fmt.Errorf("max retries exceeded waiting for hub")
 			}
 		}
@@ -249,7 +279,7 @@ func EnsureHubRunning(config AutoStartConfig) (*Conn, error) {
 // StopHub connects to a running hub and requests shutdown.
 func StopHub(socketPath string) error {
 	if socketPath == "" {
-		socketPath = socket.DefaultSocketPath("mcp-hub")
+		socketPath = socket.DefaultSocketPath(socket.DefaultSocketName)
 	}
 
 	conn := NewConn(WithSocketPath(socketPath))
@@ -268,7 +298,7 @@ func StopHub(socketPath string) error {
 // IsHubRunning checks if the hub is running at the given socket path.
 func IsHubRunning(socketPath string) bool {
 	if socketPath == "" {
-		socketPath = socket.DefaultSocketPath("mcp-hub")
+		socketPath = socket.DefaultSocketPath(socket.DefaultSocketName)
 	}
 	return socket.IsRunning(socketPath)
 }

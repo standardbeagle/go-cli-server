@@ -252,10 +252,18 @@ func (pt *FilePIDTracker) CleanupOrphans(currentDaemonPID int) (killedCount int,
 	// process we tracked — a bare liveness check would SIGKILL whatever
 	// unrelated process the kernel has since recycled the PID into.
 	for _, proc := range tracking.Processes {
-		// Kill stored descendants first (catches processes that may have been
-		// reparented since the parent died). A descendant PID is a single
-		// process, not a group leader, so pass pid as its own (non-group) id —
-		// killOrphanProcess only signals the group when pid == pgid.
+		// Only act when the tracked parent is verifiably still OUR process (alive
+		// AND identity match). Stored descendant PIDs carry no identity token, so
+		// chasing them after the parent is gone would SIGKILL whatever unrelated
+		// process the kernel has since recycled those hours-old PIDs into.
+		if !(isProcessAlive(proc.PID) && identityMatches(proc)) {
+			continue
+		}
+
+		// Kill stored descendants first (catches processes reparented since the
+		// parent died). A descendant PID is a single process, not a group leader,
+		// so pass 0 as pgid — killOrphanProcess only signals the group when
+		// pid == pgid.
 		for _, dpid := range proc.DescendantPIDs {
 			if isProcessAlive(dpid) {
 				killOrphanProcess(dpid, 0)
@@ -263,11 +271,9 @@ func (pt *FilePIDTracker) CleanupOrphans(currentDaemonPID int) (killedCount int,
 			}
 		}
 
-		if isProcessAlive(proc.PID) && identityMatches(proc) {
-			killOrphanProcess(proc.PID, proc.PGID)
-			killedCount++
-			time.Sleep(10 * time.Millisecond)
-		}
+		killOrphanProcess(proc.PID, proc.PGID)
+		killedCount++
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Clear old tracking and set new daemon PID

@@ -5,3 +5,6 @@
 /hubctl
 *.exe
 
+
+# Startup lock files (created by client auto-start)
+*.startup.lock

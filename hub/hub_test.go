@@ -11,14 +11,15 @@ import (
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/protocol"
+	"github.com/standardbeagle/go-cli-server/socket"
 )
 
 // TestDefaultConfig verifies the default configuration values.
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.SocketName != "mcp-hub" {
-		t.Errorf("SocketName = %q, want %q", cfg.SocketName, "mcp-hub")
+	if cfg.SocketName != socket.DefaultSocketName {
+		t.Errorf("SocketName = %q, want %q", cfg.SocketName, socket.DefaultSocketName)
 	}
 	if cfg.MaxClients != 0 {
 		t.Errorf("MaxClients = %d, want 0 (unlimited)", cfg.MaxClients)
@@ -81,8 +82,8 @@ func TestNewWithEmptySocketName(t *testing.T) {
 	}
 
 	h := New(cfg)
-	if h.config.SocketName != "mcp-hub" {
-		t.Errorf("SocketName = %q, want %q (default)", h.config.SocketName, "mcp-hub")
+	if h.config.SocketName != socket.DefaultSocketName {
+		t.Errorf("SocketName = %q, want %q (default)", h.config.SocketName, socket.DefaultSocketName)
 	}
 }
 
@@ -501,15 +502,6 @@ func TestBuiltinCommandsRegistered(t *testing.T) {
 	if !h.commands.HasVerb("RUN-JSON") {
 		t.Error("RUN-JSON command should be registered")
 	}
-	if !h.commands.HasVerb("RELAY") {
-		t.Error("RELAY command should be registered")
-	}
-	if !h.commands.HasVerb("ATTACH") {
-		t.Error("ATTACH command should be registered")
-	}
-	if !h.commands.HasVerb("DETACH") {
-		t.Error("DETACH command should be registered")
-	}
 	if !h.commands.HasVerb("SESSION") {
 		t.Error("SESSION command should be registered")
 	}
@@ -533,8 +525,8 @@ func TestBuiltinCommandsWithoutProcessMgmt(t *testing.T) {
 	}
 
 	// Other commands should still be registered
-	if !h.commands.HasVerb("RELAY") {
-		t.Error("RELAY command should still be registered")
+	if !h.commands.HasVerb("SESSION") {
+		t.Error("SESSION command should still be registered")
 	}
 }
 
@@ -592,18 +584,6 @@ func TestIsShuttingDown(t *testing.T) {
 	if !h.IsShuttingDown() {
 		t.Error("Hub should be shutting down after Stop")
 	}
-}
-
-// TestExternalProcessRegistry verifies external process tracking.
-func TestExternalProcessRegistry(t *testing.T) {
-	cfg := DefaultConfig()
-	h := New(cfg)
-
-	// Initially empty
-	h.externalProcs.Range(func(key, value any) bool {
-		t.Error("externalProcs should be empty initially")
-		return false
-	})
 }
 
 // TestSessionRegistry verifies session tracking.
@@ -1217,249 +1197,8 @@ func TestSessionNoSubcommand(t *testing.T) {
 }
 
 // =============================================================================
-// Handler Tests - RELAY commands
-// =============================================================================
-
-// TestRelayNoSubcommand tests RELAY without subcommand.
-func TestRelayNoSubcommand(t *testing.T) {
-	tmpDir := t.TempDir()
-	sockPath := filepath.Join(tmpDir, "hub.sock")
-
-	cfg := DefaultConfig()
-	cfg.SocketPath = sockPath
-	cfg.EnableProcessMgmt = false
-
-	h := New(cfg)
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = h.Stop(ctx)
-	}()
-
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		t.Fatalf("Failed to connect: %v", err)
-	}
-	defer conn.Close()
-
-	writer := protocol.NewWriter(conn)
-	parser := protocol.NewParser(conn)
-
-	// Send RELAY without subcommand - returns structured error as JSON
-	if err := writer.WriteCommand("RELAY", nil, nil); err != nil {
-		t.Fatalf("WriteCommand error = %v", err)
-	}
-
-	resp, err := parser.ParseResponse()
-	if err != nil {
-		t.Fatalf("ParseResponse error = %v", err)
-	}
-
-	// WriteStructuredErr returns JSON, not ERR
-	if resp.Type != protocol.ResponseJSON {
-		t.Errorf("Response type = %v, want JSON (structured error)", resp.Type)
-	}
-}
-
-// TestRelaySendNoTarget tests RELAY SEND without target.
-func TestRelaySendNoTarget(t *testing.T) {
-	tmpDir := t.TempDir()
-	sockPath := filepath.Join(tmpDir, "hub.sock")
-
-	cfg := DefaultConfig()
-	cfg.SocketPath = sockPath
-	cfg.EnableProcessMgmt = false
-
-	h := New(cfg)
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = h.Stop(ctx)
-	}()
-
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		t.Fatalf("Failed to connect: %v", err)
-	}
-	defer conn.Close()
-
-	writer := protocol.NewWriter(conn)
-	parser := protocol.NewParser(conn)
-
-	// Send RELAY SEND without target
-	if err := writer.WriteCommand("RELAY", []string{"SEND"}, nil); err != nil {
-		t.Fatalf("WriteCommand error = %v", err)
-	}
-
-	resp, err := parser.ParseResponse()
-	if err != nil {
-		t.Fatalf("ParseResponse error = %v", err)
-	}
-
-	// WriteMissingParam uses WriteStructuredErr which returns JSON
-	if resp.Type != protocol.ResponseJSON {
-		t.Errorf("Response type = %v, want JSON", resp.Type)
-	}
-}
-
-// =============================================================================
 // Handler Tests - Connection methods
 // =============================================================================
-
-// TestConnectionSessionCode tests ATTACH/DETACH for external process registration.
-func TestConnectionSessionCode(t *testing.T) {
-	tmpDir := t.TempDir()
-	sockPath := filepath.Join(tmpDir, "hub.sock")
-
-	cfg := DefaultConfig()
-	cfg.SocketPath = sockPath
-	cfg.EnableProcessMgmt = false
-
-	h := New(cfg)
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = h.Stop(ctx)
-	}()
-
-	// Connect and interact
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		t.Fatalf("Failed to connect: %v", err)
-	}
-	defer conn.Close()
-
-	writer := protocol.NewWriter(conn)
-	parser := protocol.NewParser(conn)
-
-	// ATTACH requires JSON config with 'id' field
-	attachConfig := []byte(`{"id": "test-ext-proc", "project_path": "/test/path"}`)
-	if err := writer.WriteCommand("ATTACH", nil, attachConfig); err != nil {
-		t.Fatalf("WriteCommand error = %v", err)
-	}
-
-	resp, err := parser.ParseResponse()
-	if err != nil {
-		t.Fatalf("ParseResponse error = %v", err)
-	}
-
-	if resp.Type != protocol.ResponseOK {
-		t.Errorf("ATTACH response type = %v, want OK", resp.Type)
-	}
-
-	// DETACH the process - requires ID arg
-	if err := writer.WriteCommand("DETACH", []string{"test-ext-proc"}, nil); err != nil {
-		t.Fatalf("WriteCommand error = %v", err)
-	}
-
-	resp, err = parser.ParseResponse()
-	if err != nil {
-		t.Fatalf("ParseResponse error = %v", err)
-	}
-
-	if resp.Type != protocol.ResponseOK {
-		t.Errorf("DETACH response type = %v, want OK", resp.Type)
-	}
-}
-
-// TestAttachNotFound tests ATTACH with non-existent session.
-func TestAttachNotFound(t *testing.T) {
-	tmpDir := t.TempDir()
-	sockPath := filepath.Join(tmpDir, "hub.sock")
-
-	cfg := DefaultConfig()
-	cfg.SocketPath = sockPath
-	cfg.EnableProcessMgmt = false
-
-	h := New(cfg)
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = h.Stop(ctx)
-	}()
-
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		t.Fatalf("Failed to connect: %v", err)
-	}
-	defer conn.Close()
-
-	writer := protocol.NewWriter(conn)
-	parser := protocol.NewParser(conn)
-
-	// ATTACH to non-existent session (ATTACH expects JSON with 'id' field)
-	// Sending via args won't work - handler requires JSON data
-	// So this will return a missing param error since cfg.ID is empty
-	if err := writer.WriteCommand("ATTACH", []string{"nonexistent"}, nil); err != nil {
-		t.Fatalf("WriteCommand error = %v", err)
-	}
-
-	resp, err := parser.ParseResponse()
-	if err != nil {
-		t.Fatalf("ParseResponse error = %v", err)
-	}
-
-	// WriteMissingParam uses WriteStructuredErr which returns JSON
-	if resp.Type != protocol.ResponseJSON {
-		t.Errorf("Response type = %v, want JSON", resp.Type)
-	}
-}
-
-// TestAttachNoCode tests ATTACH without session code.
-func TestAttachNoCode(t *testing.T) {
-	tmpDir := t.TempDir()
-	sockPath := filepath.Join(tmpDir, "hub.sock")
-
-	cfg := DefaultConfig()
-	cfg.SocketPath = sockPath
-	cfg.EnableProcessMgmt = false
-
-	h := New(cfg)
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = h.Stop(ctx)
-	}()
-
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		t.Fatalf("Failed to connect: %v", err)
-	}
-	defer conn.Close()
-
-	writer := protocol.NewWriter(conn)
-	parser := protocol.NewParser(conn)
-
-	// ATTACH without session code
-	if err := writer.WriteCommand("ATTACH", nil, nil); err != nil {
-		t.Fatalf("WriteCommand error = %v", err)
-	}
-
-	resp, err := parser.ParseResponse()
-	if err != nil {
-		t.Fatalf("ParseResponse error = %v", err)
-	}
-
-	// WriteMissingParam uses WriteStructuredErr which returns JSON
-	if resp.Type != protocol.ResponseJSON {
-		t.Errorf("Response type = %v, want JSON", resp.Type)
-	}
-}
 
 // TestUnknownCommand tests handling of unknown commands.
 func TestUnknownCommand(t *testing.T) {
@@ -1501,45 +1240,6 @@ func TestUnknownCommand(t *testing.T) {
 
 	if resp.Type != protocol.ResponseErr {
 		t.Errorf("Response type = %v, want ERR", resp.Type)
-	}
-}
-
-// TestExternalProcessOperations tests external process registry operations.
-func TestExternalProcessOperations(t *testing.T) {
-	cfg := DefaultConfig()
-	h := New(cfg)
-
-	proc := &ExternalProcess{
-		ID:          "test-ext-1",
-		ProjectPath: "/test/project",
-	}
-
-	// Register
-	if err := h.RegisterExternalProcess(proc); err != nil {
-		t.Fatalf("RegisterExternalProcess error = %v", err)
-	}
-
-	// Get
-	got, ok := h.GetExternalProcess("test-ext-1")
-	if !ok {
-		t.Fatal("GetExternalProcess returned false")
-	}
-	if got.ProjectPath != "/test/project" {
-		t.Errorf("ProjectPath = %q, want %q", got.ProjectPath, "/test/project")
-	}
-
-	// Register duplicate should fail
-	if err := h.RegisterExternalProcess(proc); err == nil {
-		t.Error("RegisterExternalProcess should fail for duplicate")
-	}
-
-	// Unregister
-	h.UnregisterExternalProcess("test-ext-1")
-
-	// Get should fail now
-	_, ok = h.GetExternalProcess("test-ext-1")
-	if ok {
-		t.Error("GetExternalProcess should return false after unregister")
 	}
 }
 

@@ -206,12 +206,38 @@ func (h *Hub) handleRun(ctx context.Context, conn *Connection, cmd *protocol.Com
 		return conn.WriteMissingParam("RUN", "command", "command or script_name required")
 	}
 
+	// Resolve a script_name to its command. Previously script_name was validated
+	// as an acceptable alternative to command but then dropped, so procCfg.Command
+	// stayed empty and RUN started an empty process. Fail fast instead of that.
+	command, args, env := cfg.Command, cfg.Args, cfg.Env
+	id := cfg.ID
+	if command == "" && cfg.ScriptName != "" {
+		reg := h.pm.ScriptRegistry()
+		if reg == nil {
+			return conn.WriteInternalErr("script registry not configured; cannot run by script_name")
+		}
+		entry, ok := reg.Get(cfg.ScriptName, normalizePath(cfg.Path))
+		if !ok {
+			return conn.WriteNotFound("script", fmt.Sprintf("%s in %s", cfg.ScriptName, cfg.Path))
+		}
+		command, args = entry.ResolvedCommand()
+		if command == "" {
+			return conn.WriteInternalErr(fmt.Sprintf("script %q has no resolved command", cfg.ScriptName))
+		}
+		if id == "" {
+			id = entry.ProcessID // link the process to its script entry
+		}
+		if len(env) == 0 && entry.Config != nil {
+			env = mapToEnv(entry.Config.Env)
+		}
+	}
+
 	procCfg := process.ProcessConfig{
-		ID:          cfg.ID,
+		ID:          id,
 		ProjectPath: cfg.Path,
-		Command:     cfg.Command,
-		Args:        cfg.Args,
-		Env:         cfg.Env,
+		Command:     command,
+		Args:        args,
+		Env:         env,
 		EnableStdin: cfg.EnableStdin,
 	}
 
@@ -230,109 +256,6 @@ func (h *Hub) handleRun(ctx context.Context, conn *Connection, cmd *protocol.Com
 
 	data, _ := json.Marshal(response)
 	return conn.WriteJSON(data)
-}
-
-// handleRelay handles RELAY commands for message routing.
-func (h *Hub) handleRelay(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
-	if cmd.SubVerb == "" && len(cmd.Args) > 0 {
-		cmd.SubVerb = strings.ToUpper(cmd.Args[0])
-		cmd.Args = cmd.Args[1:]
-	}
-
-	switch cmd.SubVerb {
-	case "SEND":
-		return h.handleRelaySend(conn, cmd)
-	case "BROADCAST":
-		return h.handleRelayBroadcast(conn, cmd)
-	case "REQUEST":
-		return h.handleRelayRequest(ctx, conn, cmd)
-	default:
-		return conn.WriteInvalidAction("RELAY", cmd.SubVerb, []string{"SEND", "BROADCAST", "REQUEST"})
-	}
-}
-
-func (h *Hub) handleRelaySend(conn *Connection, cmd *protocol.Command) error {
-	if len(cmd.Args) == 0 {
-		return conn.WriteMissingParam("RELAY SEND", "target", "target process ID required")
-	}
-
-	target := cmd.Args[0]
-	proc, ok := h.GetExternalProcess(target)
-	if !ok {
-		return conn.WriteErr(protocol.ErrNotAttached, "target process not attached")
-	}
-
-	msg := &Message{
-		From:      fmt.Sprintf("client-%d", conn.ID()),
-		To:        target,
-		Type:      "relay",
-		Data:      cmd.Data,
-		Timestamp: time.Now(),
-	}
-
-	select {
-	case proc.Inbox <- msg:
-		return conn.WriteOK("sent")
-	default:
-		return conn.WriteErr(protocol.ErrDeliveryFailed, "inbox full")
-	}
-}
-
-func (h *Hub) handleRelayBroadcast(conn *Connection, cmd *protocol.Command) error {
-	msg := &Message{
-		From:      fmt.Sprintf("client-%d", conn.ID()),
-		To:        "*",
-		Type:      "broadcast",
-		Data:      cmd.Data,
-		Timestamp: time.Now(),
-	}
-
-	h.BroadcastToExternal(msg)
-	return conn.WriteOK("broadcast sent")
-}
-
-func (h *Hub) handleRelayRequest(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
-	// TODO: Implement request-response pattern with correlation ID
-	return conn.WriteInvalidAction("RELAY", "REQUEST", []string{"SEND", "BROADCAST"})
-}
-
-// handleAttach handles ATTACH command for external process registration.
-func (h *Hub) handleAttach(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
-	var cfg protocol.AttachConfig
-	if len(cmd.Data) > 0 {
-		if err := json.Unmarshal(cmd.Data, &cfg); err != nil {
-			return conn.WriteErr(protocol.ErrInvalidArgs, "invalid JSON config")
-		}
-	}
-
-	if cfg.ID == "" {
-		return conn.WriteMissingParam("ATTACH", "id", "id required")
-	}
-
-	// Note: For a full implementation, the external process would connect
-	// on its own socket. For now, we just register the ID.
-	proc := &ExternalProcess{
-		ID:          cfg.ID,
-		ProjectPath: cfg.ProjectPath,
-		Labels:      cfg.Labels,
-		Inbox:       make(chan *Message, 100),
-	}
-
-	if err := h.RegisterExternalProcess(proc); err != nil {
-		return conn.WriteErr(protocol.ErrAlreadyExists, err.Error())
-	}
-
-	return conn.WriteOK("attached")
-}
-
-// handleDetach handles DETACH command for external process removal.
-func (h *Hub) handleDetach(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
-	if len(cmd.Args) == 0 {
-		return conn.WriteMissingParam("DETACH", "id", "process ID required")
-	}
-
-	h.UnregisterExternalProcess(cmd.Args[0])
-	return conn.WriteOK("detached")
 }
 
 // handleSession handles SESSION commands.
@@ -374,8 +297,8 @@ func (h *Hub) handleSessionRegister(conn *Connection, cmd *protocol.Command) err
 		Command:     cfg.Command,
 		Args:        cfg.Args,
 		StartedAt:   time.Now(),
-		LastSeen:    time.Now(),
 	}
+	session.SetLastSeen(time.Now())
 
 	h.sessions.Store(code, session)
 	conn.SetSessionCode(code)
@@ -410,7 +333,7 @@ func (h *Hub) handleSessionHeartbeat(conn *Connection, cmd *protocol.Command) er
 
 	if val, ok := h.sessions.Load(code); ok {
 		session := val.(*Session)
-		session.LastSeen = time.Now()
+		session.SetLastSeen(time.Now())
 	}
 
 	return conn.WriteOK("heartbeat")
@@ -426,7 +349,7 @@ func (h *Hub) handleSessionList(conn *Connection, cmd *protocol.Command) error {
 			"project_path": session.ProjectPath,
 			"command":      session.Command,
 			"started_at":   session.StartedAt.Format(time.RFC3339),
-			"last_seen":    session.LastSeen.Format(time.RFC3339),
+			"last_seen":    session.LastSeen().Format(time.RFC3339),
 		})
 		return true
 	})
@@ -452,7 +375,7 @@ func (h *Hub) handleSessionGet(conn *Connection, cmd *protocol.Command) error {
 		"command":      session.Command,
 		"args":         session.Args,
 		"started_at":   session.StartedAt.Format(time.RFC3339),
-		"last_seen":    session.LastSeen.Format(time.RFC3339),
+		"last_seen":    session.LastSeen().Format(time.RFC3339),
 	}
 
 	data, _ := json.Marshal(result)

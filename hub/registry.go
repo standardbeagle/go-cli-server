@@ -98,6 +98,10 @@ func (r *CommandRegistry) Dispatch(ctx context.Context, conn *Connection, cmd *p
 
 	val, ok := r.handlers.Load(verb)
 	if !ok {
+		// Fall back to the catch-all handler (e.g. subprocess router) if registered.
+		if catchAll, hasCatchAll := r.handlers.Load("*"); hasCatchAll {
+			return catchAll.(*verbHandler).handler(ctx, conn, cmd)
+		}
 		return conn.WriteInvalidAction("", cmd.Verb, r.validVerbs())
 	}
 
@@ -129,7 +133,9 @@ func (r *CommandRegistry) HasVerb(verb string) bool {
 func (r *CommandRegistry) validVerbs() []string {
 	var verbs []string
 	r.handlers.Range(func(key, _ any) bool {
-		verbs = append(verbs, key.(string))
+		if key.(string) != "*" {
+			verbs = append(verbs, key.(string))
+		}
 		return true
 	})
 	return verbs
