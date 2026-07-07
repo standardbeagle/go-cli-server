@@ -75,10 +75,46 @@ type ManagedSubprocess struct {
 	healthy          atomic.Bool
 	consecutiveFails atomic.Int32
 
-	// Lifecycle
+	// Lifecycle. The context is held behind an atomic pointer so start()/restart
+	// can install a fresh one without racing readers (health loop, monitored
+	// process, stop()).
+	life atomic.Pointer[subprocessLifecycle]
+	wg   sync.WaitGroup
+}
+
+// subprocessLifecycle bundles a cancellable context with its cancel func.
+type subprocessLifecycle struct {
 	ctx    context.Context
 	cancel context.CancelFunc
-	wg     sync.WaitGroup
+}
+
+// canceledContext is returned when no lifecycle has been installed yet.
+var canceledContext = func() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}()
+
+// newLifecycle installs a fresh cancellable context and returns it.
+func (sp *ManagedSubprocess) newLifecycle() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	sp.life.Store(&subprocessLifecycle{ctx: ctx, cancel: cancel})
+	return ctx
+}
+
+// currentCtx returns the active lifecycle context, or an already-cancelled one.
+func (sp *ManagedSubprocess) currentCtx() context.Context {
+	if l := sp.life.Load(); l != nil {
+		return l.ctx
+	}
+	return canceledContext
+}
+
+// cancelLifecycle cancels the active lifecycle context if present.
+func (sp *ManagedSubprocess) cancelLifecycle() {
+	if l := sp.life.Load(); l != nil {
+		l.cancel()
+	}
 }
 
 // ManagedSubprocessState represents subprocess state.
@@ -201,7 +237,7 @@ func (r *SubprocessRouter) Register(sp *ManagedSubprocess) error {
 	sp.stateChanged.Store(&now)
 
 	// Create cancellable context
-	sp.ctx, sp.cancel = context.WithCancel(context.Background())
+	sp.newLifecycle()
 
 	r.subprocesses.Store(sp.ID, sp)
 	r.rebuildRoutes()
@@ -217,7 +253,7 @@ func (r *SubprocessRouter) Unregister(id string) error {
 	}
 
 	sp := val.(*ManagedSubprocess)
-	sp.cancel() // Signal shutdown
+	sp.cancelLifecycle() // Signal shutdown
 
 	// Wait for graceful stop
 	done := make(chan struct{})
@@ -274,8 +310,21 @@ func (r *SubprocessRouter) rebuildRoutes() {
 			if strings.HasSuffix(pattern, " *") || strings.HasSuffix(pattern, "*") {
 				prefix := strings.TrimSuffix(strings.TrimSuffix(pattern, "*"), " ")
 				r.prefixRoutes.Store(prefix, sp.ID)
+				// Register the verb so the parser accepts it and reaches dispatch.
+				if prefix != "" {
+					protocol.DefaultRegistry.RegisterVerb(strings.Fields(prefix)[0])
+				}
 			} else {
 				r.exactRoutes.Store(pattern, sp.ID)
+				// Register verb (and sub-verb for two-word patterns) with the parser so
+				// the command survives parsing and reaches routeToSubprocess.
+				fields := strings.Fields(pattern)
+				if len(fields) > 0 {
+					protocol.DefaultRegistry.RegisterVerb(fields[0])
+				}
+				if len(fields) > 1 {
+					protocol.DefaultRegistry.RegisterSubVerb(fields[1])
+				}
 			}
 		}
 		return true
@@ -519,6 +568,13 @@ func (sp *ManagedSubprocess) start(ctx context.Context) error {
 		return fmt.Errorf("subprocess already %s", state)
 	}
 
+	// Establish a fresh lifecycle context. A prior stop() or restart cancels the
+	// old one; without recreating it here a stopped subprocess could never be
+	// started again (its exec/health goroutines would exit immediately). This is
+	// safe because we only reach here from a non-running state, after any previous
+	// worker goroutines have drained.
+	sp.newLifecycle()
+
 	sp.state.Store(SubprocessStarting)
 	now := time.Now()
 	sp.stateChanged.Store(&now)
@@ -628,7 +684,7 @@ func (sp *ManagedSubprocess) startStdio(ctx context.Context) error {
 	}
 
 	// Create the command
-	cmd := exec.CommandContext(sp.ctx, sp.Transport.Command, sp.Transport.Args...)
+	cmd := exec.CommandContext(sp.currentCtx(), sp.Transport.Command, sp.Transport.Args...)
 
 	// Set environment if specified
 	if len(sp.Transport.Env) > 0 {
@@ -694,7 +750,7 @@ func (sp *ManagedSubprocess) stop(ctx context.Context) error {
 	now := time.Now()
 	sp.stateChanged.Store(&now)
 
-	sp.cancel()
+	sp.cancelLifecycle()
 
 	// Close connection if exists
 	sp.connMu.Lock()
@@ -738,7 +794,7 @@ func (sp *ManagedSubprocess) healthCheckLoop() {
 
 	for {
 		select {
-		case <-sp.ctx.Done():
+		case <-sp.currentCtx().Done():
 			return
 		case <-ticker.C:
 			sp.doHealthCheck()
@@ -768,7 +824,7 @@ func (sp *ManagedSubprocess) doHealthCheck() {
 		timeout = 5 * time.Second
 	}
 
-	ctx, cancel := context.WithTimeout(sp.ctx, timeout)
+	ctx, cancel := context.WithTimeout(sp.currentCtx(), timeout)
 	defer cancel()
 
 	// Send PING command
@@ -823,25 +879,30 @@ func (sp *ManagedSubprocess) triggerAutoRestart() {
 		return
 	}
 
-	// Schedule restart in background
-	sp.wg.Add(1)
+	// Schedule restart in a detached goroutine. It is intentionally NOT tracked by
+	// sp.wg: doRestart waits on sp.wg for the current health/monitor goroutines to
+	// drain, and tracking itself in the same WaitGroup would deadlock that wait.
 	go sp.doRestart()
 }
 
-// doRestart performs the actual restart operation.
+// doRestart tears down the current subprocess instance and starts a fresh one.
 func (sp *ManagedSubprocess) doRestart() {
-	defer sp.wg.Done()
-
-	// Wait for restart delay
+	// Wait for the restart delay, aborting if a shutdown was requested meanwhile.
 	if sp.RestartWait > 0 {
 		select {
-		case <-sp.ctx.Done():
+		case <-sp.currentCtx().Done():
 			return
 		case <-time.After(sp.RestartWait):
 		}
 	}
 
-	// Stop current connection if any
+	// Cancel the old context so the health loop and any monitored process stop,
+	// then wait for those goroutines to exit before reconnecting. start() will
+	// install a fresh context.
+	sp.cancelLifecycle()
+	sp.wg.Wait()
+
+	// Close the stale connection.
 	sp.connMu.Lock()
 	if sp.conn != nil {
 		sp.conn.Close()
@@ -849,19 +910,22 @@ func (sp *ManagedSubprocess) doRestart() {
 	}
 	sp.connMu.Unlock()
 
-	// Increment restart count
 	sp.restartCount.Add(1)
-
-	// Reset health tracking
 	sp.consecutiveFails.Store(0)
 	sp.healthy.Store(false)
 
-	// Attempt to start
-	ctx, cancel := context.WithTimeout(sp.ctx, 30*time.Second)
+	// Reset state so start() proceeds — it refuses to start from Running/Starting.
+	sp.state.Store(SubprocessStopped)
+	now := time.Now()
+	sp.stateChanged.Store(&now)
+
+	// Use a background-derived timeout for the attempt; the just-cancelled sp.ctx
+	// must not be used here.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := sp.start(ctx); err != nil {
-		// Start failed - will be retried by next health check if still unhealthy
+		// Start failed — the next health check will retry if still unhealthy.
 		sp.state.Store(SubprocessFailed)
 		now := time.Now()
 		sp.stateChanged.Store(&now)

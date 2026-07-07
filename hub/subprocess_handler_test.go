@@ -216,7 +216,7 @@ func TestSubprocessHandler_Unregister(t *testing.T) {
 		Commands: []string{"UNREG"},
 	}
 	sp.state.Store(SubprocessPending)
-	sp.ctx, sp.cancel = context.WithCancel(context.Background())
+	sp.newLifecycle()
 	_ = router.Register(sp)
 
 	t.Run("successful unregister", func(t *testing.T) {
@@ -300,7 +300,7 @@ func TestSubprocessHandler_List(t *testing.T) {
 			Commands: []string{"CMD"},
 		}
 		sp.state.Store(SubprocessPending)
-		sp.ctx, sp.cancel = context.WithCancel(context.Background())
+		sp.newLifecycle()
 		_ = router.Register(sp)
 	}
 
@@ -344,7 +344,7 @@ func TestSubprocessHandler_Status(t *testing.T) {
 	}
 	sp.state.Store(SubprocessRunning)
 	sp.healthy.Store(true)
-	sp.ctx, sp.cancel = context.WithCancel(context.Background())
+	sp.newLifecycle()
 	_ = router.Register(sp)
 
 	t.Run("get status", func(t *testing.T) {
@@ -498,7 +498,7 @@ func TestAutoRestart(t *testing.T) {
 		},
 	}
 	sp.state.Store(SubprocessRunning)
-	sp.ctx, sp.cancel = context.WithCancel(context.Background())
+	sp.newLifecycle()
 
 	// Trigger auto-restart
 	sp.triggerAutoRestart()
@@ -512,7 +512,7 @@ func TestAutoRestart(t *testing.T) {
 	}
 
 	// Cleanup
-	sp.cancel()
+	sp.cancelLifecycle()
 	sp.wg.Wait()
 }
 
@@ -525,7 +525,7 @@ func TestAutoRestartMaxLimit(t *testing.T) {
 	}
 	sp.state.Store(SubprocessRunning)
 	sp.restartCount.Store(2) // Already at max
-	sp.ctx, sp.cancel = context.WithCancel(context.Background())
+	sp.newLifecycle()
 
 	// Trigger auto-restart - should not restart
 	sp.triggerAutoRestart()
@@ -537,5 +537,5 @@ func TestAutoRestartMaxLimit(t *testing.T) {
 	}
 
 	// Cleanup
-	sp.cancel()
+	sp.cancelLifecycle()
 }

@@ -2,9 +2,161 @@ package hub
 
 import (
 	"context"
+	"net"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/standardbeagle/go-cli-server/protocol"
 )
+
+// pongServer is a minimal subprocess server that answers PING with PONG and
+// anything else with OK, over the protocol wire format.
+type pongServer struct {
+	ln    net.Listener
+	wg    sync.WaitGroup
+	mu    sync.Mutex
+	conns []net.Conn
+}
+
+func startPongServer(t *testing.T, sockPath string) *pongServer {
+	t.Helper()
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	s := &pongServer{ln: ln}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			s.mu.Lock()
+			s.conns = append(s.conns, conn)
+			s.mu.Unlock()
+			go s.serve(conn)
+		}
+	}()
+	return s
+}
+
+func (s *pongServer) serve(conn net.Conn) {
+	parser := protocol.NewParser(conn)
+	writer := protocol.NewWriter(conn)
+	for {
+		cmd, err := parser.ParseCommand()
+		if err != nil {
+			return
+		}
+		if cmd.Verb == protocol.VerbPing {
+			_ = writer.WritePong()
+		} else {
+			_ = writer.WriteOK("ok")
+		}
+	}
+}
+
+func (s *pongServer) stop() {
+	s.ln.Close()
+	s.mu.Lock()
+	for _, c := range s.conns {
+		c.Close()
+	}
+	s.mu.Unlock()
+	s.wg.Wait()
+}
+
+// TestManagedSubprocess_StopStartCycle verifies a subprocess can be started again
+// after being stopped — the lifecycle context must be recreated rather than left
+// cancelled (which previously left a "started" subprocess permanently dead).
+func TestManagedSubprocess_StopStartCycle(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "pong.sock")
+	srv := startPongServer(t, sockPath)
+	defer srv.stop()
+
+	sp := &ManagedSubprocess{
+		ID:   "cycle",
+		Name: "Cycle",
+		Transport: SubprocessTransportConfig{
+			Type:    "unix",
+			Address: sockPath,
+			Timeout: time.Second,
+		},
+		HealthCheck: SubprocessHealthConfig{Enabled: false},
+	}
+	sp.state.Store(SubprocessPending)
+	sp.newLifecycle()
+
+	ctx := context.Background()
+	if err := sp.start(ctx); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	if got := sp.state.Load().(ManagedSubprocessState); got != SubprocessRunning {
+		t.Fatalf("after start state = %s, want running", got)
+	}
+
+	if err := sp.stop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if got := sp.state.Load().(ManagedSubprocessState); got != SubprocessStopped {
+		t.Fatalf("after stop state = %s, want stopped", got)
+	}
+
+	// The bug: start after stop returned "already running" / left it dead.
+	if err := sp.start(ctx); err != nil {
+		t.Fatalf("restart after stop: %v", err)
+	}
+	if got := sp.state.Load().(ManagedSubprocessState); got != SubprocessRunning {
+		t.Fatalf("after restart state = %s, want running", got)
+	}
+	_ = sp.stop(ctx)
+}
+
+// TestManagedSubprocess_AutoRestart verifies triggerAutoRestart from a Running
+// state actually reconnects instead of permanently bricking the subprocess.
+func TestManagedSubprocess_AutoRestart(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "pong.sock")
+	srv := startPongServer(t, sockPath)
+	defer srv.stop()
+
+	sp := &ManagedSubprocess{
+		ID:   "restart",
+		Name: "Restart",
+		Transport: SubprocessTransportConfig{
+			Type:    "unix",
+			Address: sockPath,
+			Timeout: time.Second,
+		},
+		HealthCheck: SubprocessHealthConfig{Enabled: false},
+		AutoRestart: true,
+		RestartWait: 10 * time.Millisecond,
+	}
+	sp.state.Store(SubprocessPending)
+	sp.newLifecycle()
+
+	if err := sp.start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Simulate the health path deciding the subprocess is unhealthy.
+	sp.triggerAutoRestart()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if sp.restartCount.Load() == 1 &&
+			sp.state.Load().(ManagedSubprocessState) == SubprocessRunning {
+			_ = sp.stop(context.Background())
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("subprocess did not recover: restartCount=%d state=%s",
+		sp.restartCount.Load(), sp.state.Load().(ManagedSubprocessState))
+}
 
 func TestSubprocessRouter_Register(t *testing.T) {
 	hub := New(Config{})
@@ -175,7 +327,7 @@ func TestManagedSubprocess_StateTransitions(t *testing.T) {
 		},
 	}
 	sp.state.Store(SubprocessPending)
-	sp.ctx, sp.cancel = context.WithCancel(context.Background())
+	sp.newLifecycle()
 
 	// Start should fail with invalid transport
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -237,7 +389,7 @@ func TestSubprocessTransportConfig(t *testing.T) {
 				Transport: tt.config,
 			}
 			sp.state.Store(SubprocessPending)
-			sp.ctx, sp.cancel = context.WithCancel(context.Background())
+			sp.newLifecycle()
 
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()

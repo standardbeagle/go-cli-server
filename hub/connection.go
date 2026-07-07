@@ -65,11 +65,13 @@ func (c *Connection) Handle(ctx context.Context) {
 			if err == io.EOF || socket.IsClosedError(err) {
 				return
 			}
-			if isTimeoutError(err) {
-				continue // Timeout is OK, keep waiting
-			}
-			if socket.IsClosedError(err) {
+			// A partial frame (including a mid-frame deadline timeout) desyncs the
+			// stream irrecoverably — close instead of continuing or resyncing.
+			if protocol.IsPartialFrame(err) || err == protocol.ErrFrameTooLarge {
 				return
+			}
+			if isTimeoutError(err) {
+				continue // Clean timeout between frames is OK, keep waiting
 			}
 			// Try to send error response
 			_ = c.WriteErr(protocol.ErrInvalidCommand, err.Error())
