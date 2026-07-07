@@ -4,7 +4,6 @@ package hub
 
 import (
 	"context"
-	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -68,9 +67,6 @@ type Hub struct {
 	clients     sync.Map // clientID -> *Connection
 	clientCount atomic.Int64
 	nextID      atomic.Int64
-
-	// External process registry for message relay
-	externalProcs sync.Map // processID -> *ExternalProcess
 
 	// Session registry
 	sessions sync.Map // sessionCode -> *Session
@@ -154,24 +150,6 @@ func (h *Hub) registerBuiltinCommands() {
 			Handler:  h.handleScript,
 		})
 	}
-
-	// RELAY command for message relay
-	_ = h.commands.Register(CommandDefinition{
-		Verb:     "RELAY",
-		SubVerbs: []string{"SEND", "BROADCAST", "REQUEST"},
-		Handler:  h.handleRelay,
-	})
-
-	// ATTACH/DETACH for external processes
-	_ = h.commands.Register(CommandDefinition{
-		Verb:    "ATTACH",
-		Handler: h.handleAttach,
-	})
-
-	_ = h.commands.Register(CommandDefinition{
-		Verb:    "DETACH",
-		Handler: h.handleDetach,
-	})
 
 	// SESSION command
 	_ = h.commands.Register(CommandDefinition{
@@ -390,62 +368,3 @@ func (s *Session) SetLastSeen(t time.Time) { s.lastSeen.Store(t.UnixNano()) }
 // LastSeen atomically returns the session's last-seen time.
 func (s *Session) LastSeen() time.Time { return time.Unix(0, s.lastSeen.Load()) }
 
-// ExternalProcess represents an external process connected for message relay.
-type ExternalProcess struct {
-	ID          string
-	ProjectPath string
-	Connection  net.Conn
-	Labels      map[string]string
-	Inbox       chan *Message
-}
-
-// Message represents a message for relay between processes.
-type Message struct {
-	ID        string    `json:"id,omitempty"`
-	From      string    `json:"from"`
-	To        string    `json:"to"`
-	Type      string    `json:"type"`
-	Data      []byte    `json:"data,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-// RegisterExternalProcess registers an external process for message relay.
-func (h *Hub) RegisterExternalProcess(proc *ExternalProcess) error {
-	if proc.ID == "" {
-		return errors.New("process ID is required")
-	}
-
-	_, loaded := h.externalProcs.LoadOrStore(proc.ID, proc)
-	if loaded {
-		return errors.New("process already registered")
-	}
-
-	return nil
-}
-
-// UnregisterExternalProcess removes an external process.
-func (h *Hub) UnregisterExternalProcess(id string) {
-	h.externalProcs.Delete(id)
-}
-
-// GetExternalProcess retrieves an external process by ID.
-func (h *Hub) GetExternalProcess(id string) (*ExternalProcess, bool) {
-	val, ok := h.externalProcs.Load(id)
-	if !ok {
-		return nil, false
-	}
-	return val.(*ExternalProcess), true
-}
-
-// BroadcastToExternal sends a message to all external processes.
-func (h *Hub) BroadcastToExternal(msg *Message) {
-	h.externalProcs.Range(func(key, value any) bool {
-		proc := value.(*ExternalProcess)
-		select {
-		case proc.Inbox <- msg:
-		default:
-			// Inbox full, skip
-		}
-		return true
-	})
-}

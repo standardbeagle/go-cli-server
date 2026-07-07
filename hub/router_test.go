@@ -418,3 +418,44 @@ func TestDefaultSubprocessHealthConfig(t *testing.T) {
 		t.Errorf("FailureThreshold = %d, want 3", config.FailureThreshold)
 	}
 }
+
+// TestSubprocessRouter_ConcurrentRegisterRoute exercises the previously-racy
+// path: rebuildRoutes reassigning route tables while routeToSubprocess reads
+// them. Run with -race; the atomic routeTable swap must make this clean.
+func TestSubprocessRouter_ConcurrentRegisterRoute(t *testing.T) {
+	hub := New(Config{})
+	router := NewSubprocessRouter(hub)
+
+	var wg sync.WaitGroup
+
+	// Writers: continuously register/unregister subprocesses (drives rebuildRoutes).
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				id := "sp-" + string(rune('a'+w))
+				sp := &ManagedSubprocess{
+					ID:       id,
+					Commands: []string{"PROXY *", "SESSION GET"},
+				}
+				_ = router.Register(sp)
+				_ = router.Unregister(id)
+			}
+		}(w)
+	}
+
+	// Readers: continuously route commands (reads the route table lock-free).
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				router.routes.Load()
+				_ = router.GetRoutes()
+			}
+		}()
+	}
+
+	wg.Wait()
+}

@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/standardbeagle/go-cli-server/protocol"
 	"github.com/standardbeagle/go-cli-server/socket"
@@ -51,12 +52,15 @@ func main() {
 	}
 
 	// Connect to hub
-	conn, err := net.Dial("unix", sock)
+	conn, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to hub: %v\n", err)
 		os.Exit(1)
 	}
 	defer conn.Close()
+
+	// Bound the single request/response so a wedged hub cannot hang hubctl forever.
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 	parser := protocol.NewParser(conn)
 	writer := protocol.NewWriter(conn)
@@ -122,9 +126,10 @@ func execPing(writer *protocol.Writer, parser *protocol.Parser) {
 
 	if resp.Type == protocol.ResponsePong {
 		fmt.Println("PONG")
-	} else {
-		fmt.Printf("Unexpected response: %s\n", resp.Type)
+		return
 	}
+	fmt.Printf("Unexpected response: %s\n", resp.Type)
+	os.Exit(1)
 }
 
 func execInfo(writer *protocol.Writer, parser *protocol.Parser) {
@@ -139,7 +144,7 @@ func execInfo(writer *protocol.Writer, parser *protocol.Parser) {
 		os.Exit(1)
 	}
 
-	printResponse(resp)
+	os.Exit(printResponse(resp))
 }
 
 func execSubprocess(writer *protocol.Writer, parser *protocol.Parser, args []string) {
@@ -204,7 +209,7 @@ func execSubprocess(writer *protocol.Writer, parser *protocol.Parser, args []str
 		os.Exit(1)
 	}
 
-	printResponse(resp)
+	os.Exit(printResponse(resp))
 }
 
 func execRaw(conn net.Conn, parser *protocol.Parser, data string) {
@@ -225,19 +230,24 @@ func execRaw(conn net.Conn, parser *protocol.Parser, data string) {
 		os.Exit(1)
 	}
 
-	printResponse(resp)
+	os.Exit(printResponse(resp))
 }
 
-func printResponse(resp *protocol.Response) {
+// printResponse prints the response and returns the process exit code: nonzero
+// on protocol errors / unknown types so scripts can detect failure.
+func printResponse(resp *protocol.Response) int {
 	switch resp.Type {
 	case protocol.ResponseOK:
 		fmt.Printf("OK: %s\n", resp.Message)
+		return 0
 
 	case protocol.ResponseErr:
 		fmt.Printf("ERROR [%s]: %s\n", resp.Code, resp.Message)
+		return 1
 
 	case protocol.ResponsePong:
 		fmt.Println("PONG")
+		return 0
 
 	case protocol.ResponseJSON:
 		// Pretty print JSON
@@ -248,11 +258,14 @@ func printResponse(resp *protocol.Response) {
 			formatted, _ := json.MarshalIndent(v, "", "  ")
 			fmt.Println(string(formatted))
 		}
+		return 0
 
 	case protocol.ResponseData:
 		fmt.Printf("DATA: %d bytes\n", len(resp.Data))
+		return 0
 
 	default:
 		fmt.Printf("Unknown response type: %s\n", resp.Type)
+		return 1
 	}
 }

@@ -64,13 +64,13 @@ func NewVerbRegistry() *VerbRegistry {
 	}
 	// Register built-in verbs. VerbScript was omitted, so every SCRIPT command was
 	// rejected at parse validation despite the hub registering a handler for it.
-	vr.RegisterVerb(VerbRun, VerbRunJSON, VerbProc, VerbRelay, VerbAttach, VerbDetach,
+	vr.RegisterVerb(VerbRun, VerbRunJSON, VerbProc,
 		VerbSession, VerbSubprocess, VerbScript, VerbPing, VerbInfo, VerbShutdown)
 	// Register built-in sub-verbs. SubVerbRestart (SCRIPT RESTART) was likewise
 	// declared but never registered.
 	vr.RegisterSubVerb(SubVerbStatus, SubVerbOutput, SubVerbStop, SubVerbList,
-		SubVerbCleanupPort, SubVerbStdin, SubVerbStream, SubVerbSend, SubVerbBroadcast,
-		SubVerbRequest, SubVerbRegister, SubVerbUnregister, SubVerbHeartbeat,
+		SubVerbCleanupPort, SubVerbStdin, SubVerbStream,
+		SubVerbRegister, SubVerbUnregister, SubVerbHeartbeat,
 		SubVerbGet, SubVerbStart, SubVerbClear, SubVerbSet, SubVerbRestart)
 	return vr
 }

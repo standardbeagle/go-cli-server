@@ -235,14 +235,14 @@ func (c *Conn) interruptActive() {
 }
 
 // Request creates a new request builder for the given verb and arguments.
-// The verb is the protocol command (e.g., "PROC", "RELAY", "SESSION").
+// The verb is the protocol command (e.g., "PROC", "SESSION", "SUBPROCESS").
 // Additional arguments are appended (e.g., "LIST", "STATUS", process ID).
 //
 // Example:
 //
 //	conn.Request("PROC", "LIST")
 //	conn.Request("PROC", "STATUS", processID)
-//	conn.Request("RELAY", "SEND", targetID)
+//	conn.Request("SESSION", "GET", sessionCode)
 func (c *Conn) Request(verb string, args ...string) *RequestBuilder {
 	return &RequestBuilder{
 		conn: c,

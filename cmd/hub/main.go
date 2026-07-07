@@ -31,7 +31,6 @@ import (
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/hub"
-	"github.com/standardbeagle/go-cli-server/process"
 )
 
 var (
@@ -61,15 +60,15 @@ func main() {
 		log.SetFlags(log.LstdFlags)
 	}
 
-	// Create hub configuration
-	config := hub.Config{
-		SocketPath:        *socketPath,
-		SocketName:        *socketName,
-		MaxClients:        *maxClients,
-		EnableProcessMgmt: *enableProc,
-		Version:           version,
-		ProcessConfig:     process.DefaultManagerConfig(),
-	}
+	// Start from DefaultConfig so sane defaults (notably WriteTimeout, without
+	// which a slow-loris client wedges its connection goroutine forever) are
+	// applied, then override with flags.
+	config := hub.DefaultConfig()
+	config.SocketPath = *socketPath
+	config.SocketName = *socketName
+	config.MaxClients = *maxClients
+	config.EnableProcessMgmt = *enableProc
+	config.Version = version
 
 	// Create and start hub
 	h := hub.New(config)

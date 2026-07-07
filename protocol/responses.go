@@ -59,8 +59,6 @@ const (
 	ErrMissingParam   ErrorCode = "missing_param"
 	ErrTimeout        ErrorCode = "timeout"
 	ErrInternal       ErrorCode = "internal"
-	ErrNotAttached    ErrorCode = "not_attached"    // Process not attached to hub
-	ErrDeliveryFailed ErrorCode = "delivery_failed" // Message delivery failed
 )
 
 // StructuredError contains programmatic error details.
