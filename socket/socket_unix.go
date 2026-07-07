@@ -139,12 +139,16 @@ func (sm *Manager) Listen() (net.Listener, error) {
 		return nil, err
 	}
 
-	// Bind under a restrictive umask so the socket is created 0600 atomically.
-	// RUN executes arbitrary commands, so a world-connectable socket — even for the
-	// brief window between Listen and Chmod — is a local-privilege hole.
-	oldMask := syscall.Umask(0o177)
+	// The socket lives inside a 0700 uid-owned directory (enforced by
+	// secureSocketDir above), so no other user can reach it even for the brief
+	// window between bind and Chmod. We deliberately do NOT use syscall.Umask to
+	// tighten the bind: Umask is a PROCESS-GLOBAL setting, and toggling it here
+	// races every other goroutine creating files/dirs in the same process — a
+	// concurrent os.MkdirTemp(…, 0700) landing inside the window gets masked to
+	// 0600 (no execute bit), silently making that directory unsearchable. The
+	// parent-dir containment already closes the privilege window Umask was
+	// guarding, without the global side effect.
 	listener, err := Listen("unix", sm.config.Path)
-	syscall.Umask(oldMask)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create socket: %w", err)
 	}
