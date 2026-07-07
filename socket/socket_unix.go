@@ -219,7 +219,7 @@ func (sm *Manager) checkExisting() error {
 		return fmt.Errorf("failed to read PID file: %w", err)
 	}
 
-	pid, err := strconv.Atoi(string(data))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
 		os.Remove(sm.pidFile)
 		return nil
@@ -231,6 +231,15 @@ func (sm *Manager) checkExisting() error {
 	}
 
 	if !sm.isOurDaemonProcess(pid) {
+		// A live PID that does not match our identity predicate may be PID reuse
+		// or an overly strict matcher. If the socket is accepting connections,
+		// preserve the PID file and report the daemon as running; deleting it here
+		// would disable future stale-daemon detection for a live hub.
+		conn, err := net.DialTimeout("unix", sm.config.Path, 500*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return ErrDaemonRunning
+		}
 		os.Remove(sm.pidFile)
 		return nil
 	}

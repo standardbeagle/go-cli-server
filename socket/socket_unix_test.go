@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -535,6 +536,48 @@ func TestProcessMatcher(t *testing.T) {
 	}
 
 	_ = listener
+}
+
+func TestCheckExistingPreservesPIDFileWhenSocketLiveButMatcherRejects(t *testing.T) {
+	tmpDir := t.TempDir()
+	sockPath := filepath.Join(tmpDir, "live-mismatch.sock")
+	pidFile := sockPath + ".pid"
+
+	owner := NewManager(Config{Path: sockPath})
+	listener, err := owner.Listen()
+	if err != nil {
+		t.Fatalf("owner Listen() error = %v", err)
+	}
+	defer owner.Close()
+	defer listener.Close()
+
+	contender := NewManager(Config{
+		Path: sockPath,
+		ProcessMatcher: func(pid int) bool {
+			return false
+		},
+	})
+
+	got, err := contender.Listen()
+	if got != nil {
+		got.Close()
+		t.Fatal("contender Listen() unexpectedly succeeded")
+	}
+	if !errors.Is(err, ErrDaemonRunning) {
+		t.Fatalf("contender Listen() error = %v, want ErrDaemonRunning", err)
+	}
+
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("PID file was removed: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("PID file contains invalid PID %q: %v", string(data), err)
+	}
+	if pid != os.Getpid() {
+		t.Fatalf("PID file PID = %d, want %d", pid, os.Getpid())
+	}
 }
 
 // TestConcurrentConnections tests handling of multiple concurrent connections.
