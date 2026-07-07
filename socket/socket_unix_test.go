@@ -27,8 +27,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Mode != 0600 {
 		t.Errorf("DefaultConfig().Mode = %o, want 0600", cfg.Mode)
 	}
-	if cfg.Name != "mcp-hub" {
-		t.Errorf("DefaultConfig().Name = %q, want %q", cfg.Name, "mcp-hub")
+	if cfg.Name != DefaultSocketName {
+		t.Errorf("DefaultConfig().Name = %q, want %q", cfg.Name, DefaultSocketName)
 	}
 
 	// Path should end with .sock
@@ -104,11 +104,11 @@ func hasPrefix(s, prefix string) bool {
 // TestNewManager verifies manager creation with various configurations.
 func TestNewManager(t *testing.T) {
 	tests := []struct {
-		name       string
-		config     Config
-		wantPath   string
-		wantMode   os.FileMode
-		checkPath  func(string) bool
+		name      string
+		config    Config
+		wantPath  string
+		wantMode  os.FileMode
+		checkPath func(string) bool
 	}{
 		{
 			name:     "empty config uses defaults",
@@ -582,7 +582,7 @@ func TestConcurrentConnections(t *testing.T) {
 				return
 			}
 			_, _ = conn.Write([]byte("test"))
-				_ = conn.Close()
+			_ = conn.Close()
 		}()
 	}
 

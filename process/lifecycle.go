@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -76,8 +77,7 @@ func (pm *ProcessManager) Start(ctx context.Context, proc *ManagedProcess) error
 	if proc.stdinEnabled {
 		stdinPipe, err := proc.cmd.StdinPipe()
 		if err != nil {
-			proc.SetState(StateFailed)
-			pm.IncrementFailed()
+			pm.failStart(proc)
 			return fmt.Errorf("failed to create stdin pipe for %s: %w", proc.ID, err)
 		}
 		proc.stdin = stdinPipe
@@ -85,8 +85,7 @@ func (pm *ProcessManager) Start(ctx context.Context, proc *ManagedProcess) error
 
 	// Start the process
 	if err := proc.cmd.Start(); err != nil {
-		proc.SetState(StateFailed)
-		pm.IncrementFailed()
+		pm.failStart(proc)
 		return fmt.Errorf("failed to start process %s: %w", proc.ID, err)
 	}
 
@@ -121,6 +120,16 @@ func (pm *ProcessManager) Start(ctx context.Context, proc *ManagedProcess) error
 	return nil
 }
 
+func (pm *ProcessManager) failStart(proc *ManagedProcess) {
+	proc.SetState(StateFailed)
+	pm.IncrementFailed()
+	pm.RemoveByPath(proc.ID, proc.ProjectPath)
+	if proc.cancel != nil {
+		proc.cancel()
+	}
+	close(proc.done)
+}
+
 // waitForProcess monitors the process until it exits.
 func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 	defer pm.wg.Done()
@@ -134,6 +143,10 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 	}
 
 	err := proc.cmd.Wait()
+	waitDelay := errors.Is(err, exec.ErrWaitDelay)
+	if waitDelay {
+		err = nil
+	}
 
 	// Gather the descendant set from snapshots taken while the tree was still
 	// intact: the cmd.Cancel hook (timeout/manual-cancel path) and StopProcess
@@ -334,6 +347,15 @@ func (pm *ProcessManager) forceKill(proc *ManagedProcess) error {
 	if proc.cmd == nil || proc.cmd.Process == nil {
 		return nil
 	}
+	for {
+		state := proc.State()
+		if state == StateStopping || state == StateStopped || state == StateFailed {
+			break
+		}
+		if proc.CompareAndSwapState(state, StateStopping) {
+			break
+		}
+	}
 
 	// Escalation: SIGKILL the whole group, then cancel the exec context so the
 	// runtime's own killer fires and pipes/resources are released.
@@ -472,6 +494,7 @@ func (pm *ProcessManager) RunSync(ctx context.Context, cfg ProcessConfig) (int, 
 	if err != nil {
 		return -1, err
 	}
+	defer pm.RemoveByPath(proc.ID, proc.ProjectPath)
 
 	select {
 	case <-proc.done:

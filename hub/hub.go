@@ -36,7 +36,7 @@ type Config struct {
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		SocketName:        "mcp-hub",
+		SocketName:        socket.DefaultSocketName,
 		MaxClients:        0,
 		ReadTimeout:       0,
 		WriteTimeout:      5 * time.Second,
@@ -88,7 +88,7 @@ type Hub struct {
 // New creates a new Hub with the given configuration.
 func New(config Config) *Hub {
 	if config.SocketName == "" {
-		config.SocketName = "mcp-hub"
+		config.SocketName = socket.DefaultSocketName
 	}
 
 	sockConfig := socket.Config{
@@ -367,4 +367,3 @@ func (s *Session) SetLastSeen(t time.Time) { s.lastSeen.Store(t.UnixNano()) }
 
 // LastSeen atomically returns the session's last-seen time.
 func (s *Session) LastSeen() time.Time { return time.Unix(0, s.lastSeen.Load()) }
-

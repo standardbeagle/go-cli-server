@@ -369,6 +369,10 @@ func (c *subprocessConn) writeResponse(resp *protocol.Response) error {
 		err = c.writer.WriteJSON(resp.Data)
 	case protocol.ResponseData:
 		err = c.writer.WriteData(resp.Data)
+	case protocol.ResponseChunk:
+		err = c.writer.WriteChunk(resp.Data)
+	case protocol.ResponseEnd:
+		err = c.writer.WriteEnd()
 	}
 	return err
 }

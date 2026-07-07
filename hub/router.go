@@ -158,7 +158,7 @@ type SubprocessTransportConfig struct {
 	// Address for "unix" or "tcp" transport
 	Address string `json:"address,omitempty"`
 	// Command for "stdio" transport
-	Command string `json:"command,omitempty"`
+	Command string   `json:"command,omitempty"`
 	Args    []string `json:"args,omitempty"`
 	Env     []string `json:"env,omitempty"`
 	// Timeout for connection/command operations
@@ -210,6 +210,17 @@ func (c *SubprocessConn) busy() bool { return c.inFlight.Load() > 0 }
 
 // SendCommand sends a command to the subprocess and reads the response.
 func (c *SubprocessConn) SendCommand(ctx context.Context, cmd *protocol.Command) (*protocol.Response, error) {
+	var first *protocol.Response
+	err := c.SendCommandStream(ctx, cmd, func(resp *protocol.Response) error {
+		first = resp
+		return nil
+	})
+	return first, err
+}
+
+// SendCommandStream sends a command and relays every response frame until the
+// subprocess ends the exchange. Non-streaming responses produce one callback.
+func (c *SubprocessConn) SendCommandStream(ctx context.Context, cmd *protocol.Command, handle func(*protocol.Response) error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -238,26 +249,36 @@ func (c *SubprocessConn) SendCommand(ctx context.Context, cmd *protocol.Command)
 		err = c.writer.WriteCommand(cmd.Verb, cmd.Args, cmd.Data)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to write command: %w", err)
+		return fmt.Errorf("failed to write command: %w", err)
 	}
 
-	resp, err := c.parser.ParseResponse()
-	if err != nil {
-		// The read failed (deadline or transport error) but the subprocess may
-		// still deliver the late response into the socket buffer. If we leave the
-		// connection open, the NEXT SendCommand (routed command or health PING)
-		// reads this command's stale response as its own and every subsequent
-		// exchange is off-by-one forever. Tear the connection down so the next
-		// caller fails fast and the health loop forces a reconnect. Close inline
-		// (not via c.Close, which re-locks mu) since we already hold mu.
-		if c.closer != nil {
-			_ = c.closer()
-			c.closer = nil
+	for {
+		resp, err := c.parser.ParseResponse()
+		if err != nil {
+			// The read failed (deadline or transport error) but the subprocess may
+			// still deliver the late response into the socket buffer. If we leave the
+			// connection open, the NEXT SendCommand (routed command or health PING)
+			// reads this command's stale response as its own and every subsequent
+			// exchange is off-by-one forever. Tear the connection down so the next
+			// caller fails fast and the health loop forces a reconnect. Close inline
+			// (not via c.Close, which re-locks mu) since we already hold mu.
+			if c.closer != nil {
+				_ = c.closer()
+				c.closer = nil
+			}
+			return fmt.Errorf("failed to read response: %w", err)
 		}
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		if err := handle(resp); err != nil {
+			if c.closer != nil {
+				_ = c.closer()
+				c.closer = nil
+			}
+			return err
+		}
+		if resp.Type != protocol.ResponseChunk {
+			return nil
+		}
 	}
-
-	return resp, nil
 }
 
 // Close closes the subprocess connection.
@@ -291,6 +312,9 @@ func (r *SubprocessRouter) Register(sp *ManagedSubprocess) error {
 	if sp.ID == "" {
 		return fmt.Errorf("subprocess ID is required")
 	}
+	if err := r.validateRoutePatterns(sp); err != nil {
+		return err
+	}
 
 	// Initialize state before publishing so a concurrent reader never observes a
 	// half-built subprocess.
@@ -306,6 +330,51 @@ func (r *SubprocessRouter) Register(sp *ManagedSubprocess) error {
 	}
 	r.rebuildRoutes()
 
+	return nil
+}
+
+func (r *SubprocessRouter) validateRoutePatterns(sp *ManagedSubprocess) error {
+	rt := r.routes.Load()
+	seen := make(map[string]struct{})
+
+	for _, raw := range sp.Commands {
+		pattern := strings.ToUpper(strings.TrimSpace(raw))
+		if pattern == "" {
+			continue
+		}
+
+		isPrefix := strings.HasSuffix(pattern, " *") || strings.HasSuffix(pattern, "*")
+		key := pattern
+		kind := "exact"
+		if isPrefix {
+			key = strings.TrimSpace(strings.TrimSuffix(pattern, "*"))
+			kind = "prefix"
+		}
+		fields := strings.Fields(key)
+		if len(fields) == 0 {
+			return fmt.Errorf("invalid empty command pattern %q", raw)
+		}
+		if len(fields) > 2 {
+			return fmt.Errorf("command pattern %q is unroutable: only verb or verb+subverb patterns are supported", raw)
+		}
+
+		routeKey := kind + "\x00" + strings.Join(fields, " ")
+		if _, ok := seen[routeKey]; ok {
+			return fmt.Errorf("duplicate command pattern %q in subprocess %q", raw, sp.ID)
+		}
+		seen[routeKey] = struct{}{}
+
+		normalized := strings.Join(fields, " ")
+		if kind == "exact" {
+			if existing, ok := rt.exact[normalized]; ok && existing != sp.ID {
+				return fmt.Errorf("command pattern %q already registered by subprocess %q", raw, existing)
+			}
+		} else {
+			if existing, ok := rt.prefix[normalized]; ok && existing != sp.ID {
+				return fmt.Errorf("command pattern %q already registered by subprocess %q", raw, existing)
+			}
+		}
+	}
 	return nil
 }
 
@@ -391,13 +460,14 @@ func (r *SubprocessRouter) rebuildRoutes() {
 
 			// Check for wildcard suffix
 			if strings.HasSuffix(pattern, " *") || strings.HasSuffix(pattern, "*") {
-				p := strings.TrimSuffix(strings.TrimSuffix(pattern, "*"), " ")
+				p := strings.Join(strings.Fields(strings.TrimSuffix(pattern, "*")), " ")
 				prefix[p] = sp.ID
 				// Register the verb so the parser accepts it and reaches dispatch.
 				if p != "" {
 					protocol.DefaultRegistry.RegisterVerb(strings.Fields(p)[0])
 				}
 			} else {
+				pattern = strings.Join(strings.Fields(pattern), " ")
 				exact[pattern] = sp.ID
 				// Register verb (and sub-verb for two-word patterns) with the parser so
 				// the command survives parsing and reaches routeToSubprocess.
@@ -483,7 +553,9 @@ func (r *SubprocessRouter) routeToSubprocess(ctx context.Context, conn *Connecti
 	// Mark the connection busy so a concurrent health PING skips instead of
 	// blocking on mu behind this command and mistaking the wait for a failure.
 	spConn.inFlight.Add(1)
-	resp, err := spConn.SendCommand(ctx, cmd)
+	err := spConn.SendCommandStream(ctx, cmd, func(resp *protocol.Response) error {
+		return r.relayResponse(conn, resp)
+	})
 	spConn.inFlight.Add(-1)
 	if err != nil {
 		sp.commandsFailed.Add(1)
@@ -492,9 +564,7 @@ func (r *SubprocessRouter) routeToSubprocess(ctx context.Context, conn *Connecti
 	}
 
 	sp.commandsHandled.Add(1)
-
-	// Relay response back to client
-	return r.relayResponse(conn, resp)
+	return nil
 }
 
 // relayResponse relays a subprocess response to the client connection.
@@ -510,6 +580,10 @@ func (r *SubprocessRouter) relayResponse(conn *Connection, resp *protocol.Respon
 		return conn.WriteData(resp.Data)
 	case protocol.ResponsePong:
 		return conn.WritePong()
+	case protocol.ResponseChunk:
+		return conn.WriteChunk(resp.Data)
+	case protocol.ResponseEnd:
+		return conn.WriteEnd()
 	default:
 		return conn.WriteInternalErr(fmt.Sprintf("unknown response type from subprocess: %s", resp.Type))
 	}
@@ -731,6 +805,19 @@ func (sp *ManagedSubprocess) startCore(ctx context.Context) error {
 		sp.stateChanged.Store(&now)
 		return fmt.Errorf("failed to start subprocess: %w", err)
 	}
+	if sp.stopped.Load() || sp.currentCtx().Err() != nil {
+		sp.connMu.Lock()
+		if sp.conn != nil {
+			_ = sp.conn.Close()
+			sp.conn = nil
+		}
+		sp.connMu.Unlock()
+		sp.cancelLifecycle()
+		sp.state.Store(SubprocessStopped)
+		now = time.Now()
+		sp.stateChanged.Store(&now)
+		return fmt.Errorf("start aborted: subprocess stopped")
+	}
 
 	sp.state.Store(SubprocessRunning)
 	sp.healthy.Store(true)
@@ -887,6 +974,13 @@ func (sp *ManagedSubprocess) startStdio(ctx context.Context) error {
 			// early-returns for non-Running state, so nothing else would ever
 			// trigger auto-restart for it.
 			sp.triggerAutoRestart()
+			return
+		}
+		if err == nil && sp.state.Load() == SubprocessRunning {
+			sp.state.Store(SubprocessStopped)
+			now := time.Now()
+			sp.stateChanged.Store(&now)
+			sp.healthy.Store(false)
 		}
 	}()
 
@@ -896,7 +990,7 @@ func (sp *ManagedSubprocess) startStdio(ctx context.Context) error {
 // stop stops the subprocess.
 func (sp *ManagedSubprocess) stop(ctx context.Context) error {
 	state := sp.state.Load().(ManagedSubprocessState)
-	if state != SubprocessRunning {
+	if state != SubprocessRunning && state != SubprocessStarting {
 		return nil
 	}
 
@@ -1075,12 +1169,14 @@ func (sp *ManagedSubprocess) doRestart() {
 		// Wait for the restart delay, aborting if a shutdown was requested. After a
 		// failed attempt start() installs a fresh (live) context, so this select
 		// only unblocks early on a real stop()/Unregister.
-		if sp.RestartWait > 0 {
-			select {
-			case <-sp.currentCtx().Done():
-				return
-			case <-time.After(sp.RestartWait):
-			}
+		restartWait := sp.RestartWait
+		if restartWait <= 0 {
+			restartWait = time.Second
+		}
+		select {
+		case <-sp.currentCtx().Done():
+			return
+		case <-time.After(restartWait):
 		}
 
 		// Abort if the user deliberately stopped the subprocess while this restart

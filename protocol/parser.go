@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // Protocol constants for resilient parsing
@@ -302,7 +303,7 @@ func (p *Parser) readUntilTerminator(terminator string) (string, error) {
 		buf.WriteByte(b)
 
 		if buf.Len() > MaxFrameSize {
-			return "", ErrFrameTooLarge
+			return "", &PartialFrameError{Err: ErrFrameTooLarge}
 		}
 
 		if buf.Len() >= termLen {
@@ -419,8 +420,19 @@ func validateToken(kind, tok string, allowSpace bool) error {
 	if tok == DataMarker {
 		return fmt.Errorf("%s cannot be the data marker %q", kind, DataMarker)
 	}
-	if !allowSpace && strings.ContainsAny(tok, " \t") {
-		return fmt.Errorf("%s %q contains whitespace", kind, tok)
+	if !allowSpace {
+		for _, r := range tok {
+			if unicode.IsSpace(r) {
+				return fmt.Errorf("%s %q contains whitespace", kind, tok)
+			}
+		}
+	}
+	return nil
+}
+
+func validateFrameSize(frame []byte) error {
+	if len(frame) > MaxFrameSize {
+		return ErrFrameTooLarge
 	}
 	return nil
 }
@@ -466,43 +478,71 @@ func NewWriter(w io.Writer) *Writer {
 
 // WriteOK writes an OK response.
 func (w *Writer) WriteOK(message string) error {
-	_, err := w.w.Write(FormatOK(message))
+	frame := FormatOK(message)
+	if err := validateFrameSize(frame); err != nil {
+		return err
+	}
+	_, err := w.w.Write(frame)
 	return err
 }
 
 // WriteErr writes an error response.
 func (w *Writer) WriteErr(code ErrorCode, message string) error {
-	_, err := w.w.Write(FormatErr(code, message))
+	frame := FormatErr(code, message)
+	if err := validateFrameSize(frame); err != nil {
+		return err
+	}
+	_, err := w.w.Write(frame)
 	return err
 }
 
 // WritePong writes a PONG response.
 func (w *Writer) WritePong() error {
-	_, err := w.w.Write(FormatPong())
+	frame := FormatPong()
+	if err := validateFrameSize(frame); err != nil {
+		return err
+	}
+	_, err := w.w.Write(frame)
 	return err
 }
 
 // WriteJSON writes a JSON response.
 func (w *Writer) WriteJSON(data []byte) error {
-	_, err := w.w.Write(FormatJSON(data))
+	frame := FormatJSON(data)
+	if err := validateFrameSize(frame); err != nil {
+		return err
+	}
+	_, err := w.w.Write(frame)
 	return err
 }
 
 // WriteData writes a binary data response.
 func (w *Writer) WriteData(data []byte) error {
-	_, err := w.w.Write(FormatData(data))
+	frame := FormatData(data)
+	if err := validateFrameSize(frame); err != nil {
+		return err
+	}
+	_, err := w.w.Write(frame)
 	return err
 }
 
 // WriteChunk writes a chunk in a streaming response.
 func (w *Writer) WriteChunk(data []byte) error {
-	_, err := w.w.Write(FormatChunk(data))
+	frame := FormatChunk(data)
+	if err := validateFrameSize(frame); err != nil {
+		return err
+	}
+	_, err := w.w.Write(frame)
 	return err
 }
 
 // WriteEnd writes the END marker for chunked responses.
 func (w *Writer) WriteEnd() error {
-	_, err := w.w.Write(FormatEnd())
+	frame := FormatEnd()
+	if err := validateFrameSize(frame); err != nil {
+		return err
+	}
+	_, err := w.w.Write(frame)
 	return err
 }
 
@@ -516,7 +556,11 @@ func (w *Writer) WriteCommand(verb string, args []string, data []byte) error {
 	if err := ValidateCommand(cmd); err != nil {
 		return err
 	}
-	_, err := w.w.Write(FormatCommand(cmd))
+	frame := FormatCommand(cmd)
+	if err := validateFrameSize(frame); err != nil {
+		return err
+	}
+	_, err := w.w.Write(frame)
 	return err
 }
 
@@ -531,6 +575,10 @@ func (w *Writer) WriteCommandWithSubVerb(verb, subVerb string, args []string, da
 	if err := ValidateCommand(cmd); err != nil {
 		return err
 	}
-	_, err := w.w.Write(FormatCommand(cmd))
+	frame := FormatCommand(cmd)
+	if err := validateFrameSize(frame); err != nil {
+		return err
+	}
+	_, err := w.w.Write(frame)
 	return err
 }

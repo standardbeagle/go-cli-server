@@ -18,9 +18,26 @@ func sanitizeMessage(s string) string {
 	for strings.Contains(s, CommandTerminator) {
 		s = strings.ReplaceAll(s, CommandTerminator, "; ;")
 	}
+	for strings.Contains(s, " "+DataMarker+" ") {
+		s = strings.ReplaceAll(s, " "+DataMarker+" ", " - - ")
+	}
 	s = strings.ReplaceAll(s, "\r", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
 	return s
+}
+
+func sanitizeErrorCode(code ErrorCode) string {
+	s := string(code)
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return string(ErrInternal)
+	}
+	return b.String()
 }
 
 // ResponseType indicates the type of response.
@@ -134,7 +151,7 @@ func FormatOK(message string) []byte {
 // FormatErr formats an error response.
 // Format: ERR code message;;
 func FormatErr(code ErrorCode, message string) []byte {
-	return []byte(fmt.Sprintf("ERR %s %s%s", code, sanitizeMessage(message), CommandTerminator))
+	return []byte(fmt.Sprintf("ERR %s %s%s", sanitizeErrorCode(code), sanitizeMessage(message), CommandTerminator))
 }
 
 // FormatPong formats a PONG response.

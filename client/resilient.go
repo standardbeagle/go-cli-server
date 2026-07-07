@@ -81,9 +81,10 @@ type ResilientConn struct {
 	conn   *Conn
 	connMu sync.RWMutex
 
-	connected    atomic.Bool
-	reconnecting atomic.Bool
-	shutdown     atomic.Bool
+	connected       atomic.Bool
+	reconnecting    atomic.Bool
+	shutdown        atomic.Bool
+	reconnectFailed atomic.Bool
 
 	// generation increments every time a new underlying conn is published. A
 	// request builder captures the generation it was created against; an error it
@@ -114,6 +115,7 @@ func (rc *ResilientConn) Connect() error {
 	if rc.shutdown.Load() {
 		return ErrShutdown
 	}
+	rc.reconnectFailed.Store(false)
 
 	rc.connMu.Lock()
 	defer rc.connMu.Unlock()
@@ -272,7 +274,7 @@ func (rc *ResilientConn) heartbeatLoop(done <-chan struct{}) {
 			// Exit (not just skip) once shut down: a heartbeat started by a
 			// reconnect that raced Close() must terminate itself, else it spins
 			// forever.
-			if rc.shutdown.Load() {
+			if rc.shutdown.Load() || rc.reconnectFailed.Load() {
 				return
 			}
 			if rc.reconnecting.Load() {
@@ -338,6 +340,9 @@ func (rc *ResilientConn) sendHeartbeat() error {
 
 // triggerReconnect initiates the reconnection process.
 func (rc *ResilientConn) triggerReconnect(err error) {
+	if rc.shutdown.Load() || rc.reconnectFailed.Load() {
+		return
+	}
 	// Only one reconnection at a time
 	if !rc.reconnecting.CompareAndSwap(false, true) {
 		return
@@ -395,6 +400,7 @@ func (rc *ResilientConn) reconnectLoop() {
 			rc.connMu.Unlock()
 
 			rc.connected.Store(true)
+			rc.reconnectFailed.Store(false)
 			rc.reconnectCount.Add(1)
 			now := time.Now()
 			rc.lastConnectTime.Store(&now)
@@ -412,6 +418,13 @@ func (rc *ResilientConn) reconnectLoop() {
 
 		// Check if we've exceeded max attempts
 		if rc.config.MaxReconnectAttempts > 0 && attempts >= rc.config.MaxReconnectAttempts {
+			rc.reconnectFailed.Store(true)
+			rc.hbMu.Lock()
+			if rc.heartbeatCancel != nil {
+				rc.heartbeatCancel()
+				rc.heartbeatCancel = nil
+			}
+			rc.hbMu.Unlock()
 			if rc.config.OnReconnectFailed != nil {
 				rc.config.OnReconnectFailed(err)
 			}

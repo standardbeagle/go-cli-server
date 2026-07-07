@@ -11,14 +11,15 @@ import (
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/protocol"
+	"github.com/standardbeagle/go-cli-server/socket"
 )
 
 // TestDefaultConfig verifies the default configuration values.
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.SocketName != "mcp-hub" {
-		t.Errorf("SocketName = %q, want %q", cfg.SocketName, "mcp-hub")
+	if cfg.SocketName != socket.DefaultSocketName {
+		t.Errorf("SocketName = %q, want %q", cfg.SocketName, socket.DefaultSocketName)
 	}
 	if cfg.MaxClients != 0 {
 		t.Errorf("MaxClients = %d, want 0 (unlimited)", cfg.MaxClients)
@@ -81,8 +82,8 @@ func TestNewWithEmptySocketName(t *testing.T) {
 	}
 
 	h := New(cfg)
-	if h.config.SocketName != "mcp-hub" {
-		t.Errorf("SocketName = %q, want %q (default)", h.config.SocketName, "mcp-hub")
+	if h.config.SocketName != socket.DefaultSocketName {
+		t.Errorf("SocketName = %q, want %q (default)", h.config.SocketName, socket.DefaultSocketName)
 	}
 }
 
@@ -1241,7 +1242,6 @@ func TestUnknownCommand(t *testing.T) {
 		t.Errorf("Response type = %v, want ERR", resp.Type)
 	}
 }
-
 
 // TestSetSessionCleanup tests the session cleanup callback.
 func TestSetSessionCleanup(t *testing.T) {

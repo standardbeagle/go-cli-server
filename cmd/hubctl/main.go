@@ -30,7 +30,7 @@ import (
 
 func main() {
 	socketPath := flag.String("socket", "", "Hub socket path")
-	socketName := flag.String("name", "go-cli-server", "Socket name (must match the hub's -name)")
+	socketName := flag.String("name", socket.DefaultSocketName, "Socket name (must match the hub's -name)")
 	flag.Parse()
 
 	args := flag.Args()
@@ -109,7 +109,7 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("Options:")
 	fmt.Println("  --socket <path>   Hub socket path")
-	fmt.Println("  --name <name>     Socket name for the default path (default go-cli-server)")
+	fmt.Printf("  --name <name>     Socket name for the default path (default %s)\n", socket.DefaultSocketName)
 }
 
 func execPing(writer *protocol.Writer, parser *protocol.Parser) {

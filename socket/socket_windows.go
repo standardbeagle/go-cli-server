@@ -37,9 +37,9 @@ type Config struct {
 // DefaultConfig returns the default socket configuration.
 func DefaultConfig() Config {
 	return Config{
-		Path: DefaultSocketPath("mcp-hub"),
+		Path: DefaultSocketPath(DefaultSocketName),
 		Mode: 0600,
-		Name: "mcp-hub",
+		Name: DefaultSocketName,
 	}
 }
 
@@ -66,7 +66,7 @@ func NewManager(config Config) *Manager {
 	if config.Path == "" {
 		name := config.Name
 		if name == "" {
-			name = "mcp-hub"
+			name = DefaultSocketName
 		}
 		config.Path = DefaultSocketPath(name)
 	}
@@ -245,7 +245,7 @@ func terminateProcess(pid int) {
 // Connect attempts to connect to an existing socket.
 func Connect(path string) (net.Conn, error) {
 	if path == "" {
-		path = DefaultSocketPath("mcp-hub")
+		path = DefaultSocketPath(DefaultSocketName)
 	}
 
 	conn, err := net.Dial("unix", path)
@@ -262,7 +262,7 @@ func Connect(path string) (net.Conn, error) {
 // IsRunning checks if a daemon is running at the given path.
 func IsRunning(path string) bool {
 	if path == "" {
-		path = DefaultSocketPath("mcp-hub")
+		path = DefaultSocketPath(DefaultSocketName)
 	}
 
 	conn, err := net.DialTimeout("unix", path, 100*time.Millisecond)

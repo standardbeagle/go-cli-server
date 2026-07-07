@@ -16,6 +16,8 @@ var (
 	ErrProcessExists = errors.New("process already exists")
 	// ErrProcessNotFound is returned when a process ID is not found.
 	ErrProcessNotFound = errors.New("process not found")
+	// ErrProcessAmbiguous is returned when a bare process ID matches multiple project paths.
+	ErrProcessAmbiguous = errors.New("process ID is ambiguous across project paths")
 	// ErrInvalidState is returned when an operation is invalid for the current state.
 	ErrInvalidState = errors.New("invalid process state for operation")
 	// ErrShuttingDown is returned when the manager is shutting down.
@@ -137,14 +139,18 @@ func (pm *ProcessManager) Register(proc *ManagedProcess) error {
 // Get retrieves a process by ID (searches all paths).
 func (pm *ProcessManager) Get(id string) (*ManagedProcess, error) {
 	var found *ManagedProcess
+	count := 0
 	pm.processes.Range(func(key, value any) bool {
 		proc := value.(*ManagedProcess)
 		if proc.ID == id {
 			found = proc
-			return false
+			count++
 		}
-		return true
+		return count < 2
 	})
+	if count > 1 {
+		return nil, ErrProcessAmbiguous
+	}
 	if found != nil {
 		return found, nil
 	}

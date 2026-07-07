@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/hub"
+	"github.com/standardbeagle/go-cli-server/socket"
 )
 
 var (
@@ -41,7 +42,7 @@ var (
 func main() {
 	// Parse flags
 	socketPath := flag.String("socket", "", "Unix socket path (default: auto-generated)")
-	socketName := flag.String("name", "go-cli-server", "Socket name for auto-generated path")
+	socketName := flag.String("name", socket.DefaultSocketName, "Socket name for auto-generated path")
 	maxClients := flag.Int("max-clients", 0, "Maximum concurrent clients (0 = unlimited)")
 	enableProc := flag.Bool("enable-proc", true, "Enable process management commands")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging")

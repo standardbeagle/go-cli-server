@@ -121,7 +121,7 @@ func WithTimeout(d time.Duration) Option {
 // The connection is not established until the first request or EnsureConnected().
 func NewConn(opts ...Option) *Conn {
 	c := &Conn{
-		socketPath: socket.DefaultSocketPath("mcp-hub"),
+		socketPath: socket.DefaultSocketPath(socket.DefaultSocketName),
 		timeout:    30 * time.Second,
 	}
 	for _, opt := range opts {

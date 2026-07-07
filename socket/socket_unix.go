@@ -30,7 +30,7 @@ type Config struct {
 	Path string
 	// Mode is the socket file permissions (default 0600).
 	Mode os.FileMode
-	// Name is the socket name prefix for default path (default "mcp-hub").
+	// Name is the socket name prefix for default path.
 	Name string
 	// ProcessMatcher is an optional function to detect if a PID belongs to this hub.
 	// If nil, a simple cmdline check is performed.
@@ -40,9 +40,9 @@ type Config struct {
 // DefaultConfig returns the default socket configuration.
 func DefaultConfig() Config {
 	return Config{
-		Path: DefaultSocketPath("mcp-hub"),
+		Path: DefaultSocketPath(DefaultSocketName),
 		Mode: 0600,
-		Name: "mcp-hub",
+		Name: DefaultSocketName,
 	}
 }
 
@@ -109,7 +109,7 @@ func NewManager(config Config) *Manager {
 	if config.Path == "" {
 		name := config.Name
 		if name == "" {
-			name = "mcp-hub"
+			name = DefaultSocketName
 		}
 		config.Path = DefaultSocketPath(name)
 	}
@@ -326,7 +326,7 @@ func (sm *Manager) writePIDFile() error {
 // Connect attempts to connect to an existing socket.
 func Connect(path string) (net.Conn, error) {
 	if path == "" {
-		path = DefaultSocketPath("mcp-hub")
+		path = DefaultSocketPath(DefaultSocketName)
 	}
 
 	conn, err := net.Dial("unix", path)
@@ -343,7 +343,7 @@ func Connect(path string) (net.Conn, error) {
 // IsRunning checks if a daemon is running at the given path.
 func IsRunning(path string) bool {
 	if path == "" {
-		path = DefaultSocketPath("mcp-hub")
+		path = DefaultSocketPath(DefaultSocketName)
 	}
 
 	conn, err := net.DialTimeout("unix", path, 100*1e6)

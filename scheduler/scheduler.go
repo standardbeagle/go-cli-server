@@ -339,8 +339,26 @@ func parseTaskIDNum(id string) (int64, bool) {
 // Errors are intentionally ignored as persistence is best-effort.
 func (s *Scheduler) persistTask(task *Task) {
 	if s.config.StateManager != nil {
-		// Persist a snapshot so marshaling can't race a concurrent field mutation.
-		_ = s.config.StateManager.SaveTask(task.clone())
+		// Persist a snapshot under the task lock so Cancel cannot remove a task
+		// from storage while a stale retry snapshot writes it back.
+		task.mu.Lock()
+		if task.Status == TaskStatusCancelled || task.Status == TaskStatusDelivered || task.Status == TaskStatusFailed {
+			task.mu.Unlock()
+			return
+		}
+		snapshot := &Task{
+			ID:          task.ID,
+			TargetID:    task.TargetID,
+			Payload:     task.Payload,
+			DeliverAt:   task.DeliverAt,
+			CreatedAt:   task.CreatedAt,
+			ProjectPath: task.ProjectPath,
+			Status:      task.Status,
+			Attempts:    task.Attempts,
+			LastError:   task.LastError,
+		}
+		task.mu.Unlock()
+		_ = s.config.StateManager.SaveTask(snapshot)
 	}
 }
 

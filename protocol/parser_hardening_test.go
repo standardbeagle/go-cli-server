@@ -80,8 +80,28 @@ func TestFrameTooLarge(t *testing.T) {
 	// A reader that never emits a terminator.
 	p := NewParser(&infiniteReader{b: 'A'})
 	_, err := p.ParseCommand()
-	if err != ErrFrameTooLarge {
+	if !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("expected ErrFrameTooLarge, got %v", err)
+	}
+	if !IsPartialFrame(err) {
+		t.Fatalf("expected oversized frame to be partial/desync, got %T", err)
+	}
+}
+
+func TestValidateCommandRejectsUnicodeWhitespaceArg(t *testing.T) {
+	cmd := &Command{Verb: "RUN", Args: []string{"alpha\u00a0beta"}}
+	if err := ValidateCommand(cmd); err == nil {
+		t.Fatal("expected NBSP arg to be rejected")
+	}
+}
+
+func TestFormatErrSanitizesDataMarkerAndCode(t *testing.T) {
+	frame := string(FormatErr(ErrorCode("bad code;;"), "left -- right"))
+	if strings.Contains(frame, "bad code") || strings.Contains(frame, ";; left") {
+		t.Fatalf("error code was not sanitized: %q", frame)
+	}
+	if strings.Contains(frame, "left -- right") {
+		t.Fatalf("message data marker was not sanitized: %q", frame)
 	}
 }
 

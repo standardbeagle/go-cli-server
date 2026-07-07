@@ -2,15 +2,17 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/socket"
 )
+
+var errStartupLockHeld = errors.New("startup lock held")
 
 // AutoStartConfig holds configuration for auto-starting the hub.
 type AutoStartConfig struct {
@@ -185,39 +187,29 @@ func isGoTestBinary(path string) bool {
 // acquireStartupLock attempts to acquire an exclusive lock for hub startup.
 // Returns the lock file handle on success, or error if lock is held by another process.
 func acquireStartupLock(lockPath string) (*os.File, error) {
-	// Try to create lock file exclusively
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		if os.IsExist(err) {
-			// Lock file exists. Decide staleness by the owner PID, not just age:
-			// a fresh lock always carries a live PID, so validating liveness stops
-			// this process from deleting another process's just-created lock (the
-			// remove-then-recreate TOCTOU where two clients each nuke the other's
-			// fresh lock and both spawn a hub).
-			data, readErr := os.ReadFile(lockPath)
-			if readErr == nil {
-				if pid, perr := strconv.Atoi(strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])); perr == nil {
-					if lockOwnerAlive(pid) {
-						return nil, fmt.Errorf("startup lock held by live process %d", pid)
-					}
-					// Owner is dead — reap the stale lock and retry.
-					os.Remove(lockPath)
-					return acquireStartupLock(lockPath)
-				}
-			}
-			// PID unreadable/unparseable: fall back to an age check so a corrupt
-			// lock cannot wedge startup forever.
-			info, statErr := os.Stat(lockPath)
-			if statErr == nil && time.Since(info.ModTime()) > 30*time.Second {
-				os.Remove(lockPath)
-				return acquireStartupLock(lockPath)
-			}
+		return nil, err
+	}
+	if err := lockStartupFile(f); err != nil {
+		f.Close()
+		if errors.Is(err, errStartupLockHeld) {
 			return nil, fmt.Errorf("startup lock held by another process")
 		}
 		return nil, err
 	}
 
 	// Write PID and timestamp
+	if err := f.Truncate(0); err != nil {
+		_ = unlockStartupFile(f)
+		f.Close()
+		return nil, err
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		_ = unlockStartupFile(f)
+		f.Close()
+		return nil, err
+	}
 	fmt.Fprintf(f, "%d\n", os.Getpid())
 	return f, nil
 }
@@ -225,8 +217,14 @@ func acquireStartupLock(lockPath string) (*os.File, error) {
 // releaseStartupLock releases the startup lock.
 func releaseStartupLock(f *os.File, lockPath string) {
 	if f != nil {
+		own, statErr := f.Stat()
+		_ = unlockStartupFile(f)
 		f.Close()
-		os.Remove(lockPath)
+		if statErr == nil {
+			if info, err := os.Stat(lockPath); err == nil && os.SameFile(info, own) {
+				os.Remove(lockPath)
+			}
+		}
 	}
 }
 
@@ -281,7 +279,7 @@ func EnsureHubRunning(config AutoStartConfig) (*Conn, error) {
 // StopHub connects to a running hub and requests shutdown.
 func StopHub(socketPath string) error {
 	if socketPath == "" {
-		socketPath = socket.DefaultSocketPath("mcp-hub")
+		socketPath = socket.DefaultSocketPath(socket.DefaultSocketName)
 	}
 
 	conn := NewConn(WithSocketPath(socketPath))
@@ -300,7 +298,7 @@ func StopHub(socketPath string) error {
 // IsHubRunning checks if the hub is running at the given socket path.
 func IsHubRunning(socketPath string) bool {
 	if socketPath == "" {
-		socketPath = socket.DefaultSocketPath("mcp-hub")
+		socketPath = socket.DefaultSocketPath(socket.DefaultSocketName)
 	}
 	return socket.IsRunning(socketPath)
 }
