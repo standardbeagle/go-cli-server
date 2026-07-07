@@ -15,6 +15,7 @@ import (
 func startTestHub(t *testing.T, reg *script.Registry) *Hub {
 	t.Helper()
 	cfg := DefaultConfig()
+	cfg.EnableScriptCommands = true // built-in SCRIPT handlers are opt-in
 	cfg.SocketPath = filepath.Join(t.TempDir(), "test.sock")
 	h := New(cfg)
 	if reg != nil {
@@ -45,11 +46,12 @@ func connectHub(t *testing.T, sockPath string) (*protocol.Writer, *protocol.Pars
 // TestScriptHandlerRegistration verifies SCRIPT command is registered when PM exists.
 func TestScriptHandlerRegistration(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.EnableScriptCommands = true // built-in SCRIPT handlers are opt-in
 	cfg.SocketPath = filepath.Join(t.TempDir(), "test.sock")
 	h := New(cfg)
 
 	if !h.commands.HasVerb("SCRIPT") {
-		t.Error("SCRIPT command should be registered when ProcessManager is enabled")
+		t.Error("SCRIPT command should be registered when enabled with a ProcessManager")
 	}
 }
 

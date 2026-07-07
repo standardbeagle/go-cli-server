@@ -316,7 +316,8 @@ func TestSubprocessRouter_GetRoutes(t *testing.T) {
 }
 
 func TestSubprocessRouter_RejectsHubVerbCollision(t *testing.T) {
-	hub := New(Config{})
+	// SESSION built-in must be registered for the collision check to fire.
+	hub := New(Config{EnableSessionCommands: true})
 	router := NewSubprocessRouter(hub)
 
 	err := router.Register(&ManagedSubprocess{
