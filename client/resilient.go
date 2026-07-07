@@ -2,6 +2,8 @@ package client
 
 import (
 	"errors"
+	"io"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,6 +14,10 @@ var (
 	ErrReconnecting = errors.New("connection is reconnecting")
 	// ErrShutdown is returned when an operation is attempted after shutdown.
 	ErrShutdown = errors.New("connection has been shut down")
+	// errHeartbeatTimeout marks a heartbeat that did not return within the
+	// timeout. It is distinguished from a transport error so the loop can treat a
+	// timeout caused by lock contention (a busy connection) as alive.
+	errHeartbeatTimeout = errors.New("heartbeat timeout")
 )
 
 // ReconnectCallback is called after successful reconnection.
@@ -79,6 +85,13 @@ type ResilientConn struct {
 	reconnecting atomic.Bool
 	shutdown     atomic.Bool
 
+	// generation increments every time a new underlying conn is published. A
+	// request builder captures the generation it was created against; an error it
+	// later reports triggers a reconnect only if it still matches the current
+	// generation, so a stale builder holding a since-replaced conn cannot tear
+	// down the fresh healthy connection.
+	generation atomic.Int64
+
 	// Heartbeat management
 	hbMu            sync.Mutex
 	heartbeatCancel func()
@@ -120,6 +133,7 @@ func (rc *ResilientConn) Connect() error {
 	}
 
 	rc.conn = conn
+	rc.generation.Add(1)
 	rc.connected.Store(true)
 	now := time.Now()
 	rc.lastConnectTime.Store(&now)
@@ -147,6 +161,10 @@ func (rc *ResilientConn) Close() error {
 	// Close underlying connection
 	rc.connMu.Lock()
 	defer rc.connMu.Unlock()
+
+	// Clear connected so IsConnected() reports false after Close; leaving it set
+	// made a shut-down connection still look live.
+	rc.connected.Store(false)
 
 	if rc.conn != nil {
 		return rc.conn.Close()
@@ -251,12 +269,37 @@ func (rc *ResilientConn) heartbeatLoop(done <-chan struct{}) {
 		case <-done:
 			return
 		case <-ticker.C:
-			if rc.reconnecting.Load() || rc.shutdown.Load() {
+			// Exit (not just skip) once shut down: a heartbeat started by a
+			// reconnect that raced Close() must terminate itself, else it spins
+			// forever.
+			if rc.shutdown.Load() {
+				return
+			}
+			if rc.reconnecting.Load() {
+				continue
+			}
+
+			// A real request in flight demonstrates the connection is alive. A
+			// heartbeat PING would only queue behind it on Conn.mu and measure lock
+			// contention — a long chunked PROC OUTPUT transfer could hold mu past 3
+			// intervals and trip a bogus "heartbeat timeout", tearing down a healthy
+			// connection and aborting the in-flight request. Skip the probe instead.
+			rc.connMu.RLock()
+			conn := rc.conn
+			rc.connMu.RUnlock()
+			if conn != nil && conn.Busy() {
+				consecutiveFailures = 0
 				continue
 			}
 
 			err := rc.sendHeartbeat()
 			if err != nil {
+				// If a request grabbed mu after our Busy() check, the PING times out
+				// on contention, not death. Treat a busy connection as alive.
+				if errors.Is(err, errHeartbeatTimeout) && conn != nil && conn.Busy() {
+					consecutiveFailures = 0
+					continue
+				}
 				consecutiveFailures++
 				if consecutiveFailures >= maxConsecutiveFailures {
 					rc.triggerReconnect(err)
@@ -289,7 +332,7 @@ func (rc *ResilientConn) sendHeartbeat() error {
 	case err := <-done:
 		return err
 	case <-time.After(rc.config.HeartbeatTimeout):
-		return errors.New("heartbeat timeout")
+		return errHeartbeatTimeout
 	}
 }
 
@@ -338,8 +381,17 @@ func (rc *ResilientConn) reconnectLoop() {
 		// Attempt to connect
 		conn, err := EnsureHubRunning(rc.config.AutoStartConfig)
 		if err == nil {
+			// A concurrent Close() may have set shutdown after our loop-top check.
+			// Publish the new conn only if still live; otherwise close it and stop,
+			// so we don't leak a live conn + heartbeat past shutdown.
 			rc.connMu.Lock()
+			if rc.shutdown.Load() {
+				rc.connMu.Unlock()
+				conn.Close()
+				return
+			}
 			rc.conn = conn
+			rc.generation.Add(1)
 			rc.connMu.Unlock()
 
 			rc.connected.Store(true)
@@ -391,6 +443,7 @@ func (rc *ResilientConn) Request(verb string, args ...string) (*ResilientRequest
 
 	rc.connMu.RLock()
 	conn := rc.conn
+	gen := rc.generation.Load()
 	rc.connMu.RUnlock()
 
 	if conn == nil {
@@ -400,6 +453,7 @@ func (rc *ResilientConn) Request(verb string, args ...string) (*ResilientRequest
 	return &ResilientRequestBuilder{
 		rc:      rc,
 		builder: conn.Request(verb, args...),
+		gen:     gen,
 	}, nil
 }
 
@@ -407,6 +461,18 @@ func (rc *ResilientConn) Request(verb string, args ...string) (*ResilientRequest
 type ResilientRequestBuilder struct {
 	rc      *ResilientConn
 	builder *RequestBuilder
+	// gen is the connection generation this builder was created against.
+	gen int64
+}
+
+// triggerReconnect requests a reconnect only if this builder's connection is
+// still the current one. A builder holding a since-replaced conn must not tear
+// down the fresh connection over an error from the old one.
+func (r *ResilientRequestBuilder) triggerReconnect(err error) {
+	if r.gen != r.rc.generation.Load() {
+		return
+	}
+	r.rc.triggerReconnect(err)
 }
 
 // WithArgs appends additional string arguments to the request.
@@ -431,7 +497,7 @@ func (r *ResilientRequestBuilder) WithJSON(v interface{}) *ResilientRequestBuild
 func (r *ResilientRequestBuilder) OK() error {
 	err := r.builder.OK()
 	if err != nil && isConnectionError(err) {
-		r.rc.triggerReconnect(err)
+		r.triggerReconnect(err)
 	}
 	return err
 }
@@ -440,7 +506,7 @@ func (r *ResilientRequestBuilder) OK() error {
 func (r *ResilientRequestBuilder) JSON() (map[string]interface{}, error) {
 	result, err := r.builder.JSON()
 	if err != nil && isConnectionError(err) {
-		r.rc.triggerReconnect(err)
+		r.triggerReconnect(err)
 	}
 	return result, err
 }
@@ -449,7 +515,7 @@ func (r *ResilientRequestBuilder) JSON() (map[string]interface{}, error) {
 func (r *ResilientRequestBuilder) JSONInto(v interface{}) error {
 	err := r.builder.JSONInto(v)
 	if err != nil && isConnectionError(err) {
-		r.rc.triggerReconnect(err)
+		r.triggerReconnect(err)
 	}
 	return err
 }
@@ -458,7 +524,7 @@ func (r *ResilientRequestBuilder) JSONInto(v interface{}) error {
 func (r *ResilientRequestBuilder) Bytes() ([]byte, error) {
 	result, err := r.builder.Bytes()
 	if err != nil && isConnectionError(err) {
-		r.rc.triggerReconnect(err)
+		r.triggerReconnect(err)
 	}
 	return result, err
 }
@@ -467,7 +533,7 @@ func (r *ResilientRequestBuilder) Bytes() ([]byte, error) {
 func (r *ResilientRequestBuilder) Chunked() ([]byte, error) {
 	result, err := r.builder.Chunked()
 	if err != nil && isConnectionError(err) {
-		r.rc.triggerReconnect(err)
+		r.triggerReconnect(err)
 	}
 	return result, err
 }
@@ -476,77 +542,42 @@ func (r *ResilientRequestBuilder) Chunked() ([]byte, error) {
 func (r *ResilientRequestBuilder) String() (string, error) {
 	result, err := r.builder.String()
 	if err != nil && isConnectionError(err) {
-		r.rc.triggerReconnect(err)
+		r.triggerReconnect(err)
 	}
 	return result, err
 }
 
-// isConnectionError checks if an error indicates a connection problem.
+// isConnectionError reports whether err is a genuine transport failure that
+// warrants tearing down and reconnecting. It matches only on sentinels and
+// net.Error — NOT on substrings of the message. An application-level ERR from
+// the hub (e.g. "[not_found] no socket registered") is wrapped as ErrServerError
+// and must never trigger a reconnect just because its text contains "socket".
 func isConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	// Check for known connection errors
+	// Application-level protocol errors are not connection failures.
+	if errors.Is(err, ErrServerError) {
+		return false
+	}
+
 	if errors.Is(err, ErrNotConnected) || errors.Is(err, ErrConnectionClosed) {
 		return true
 	}
-
-	// Check error message for common connection problems
-	errStr := err.Error()
-	connectionErrors := []string{
-		"connection refused",
-		"broken pipe",
-		"connection reset",
-		"EOF",
-		"no such file or directory",
-		"socket",
-		"network",
-	}
-
-	for _, ce := range connectionErrors {
-		if containsIgnoreCase(errStr, ce) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// containsIgnoreCase checks if s contains substr (case-insensitive).
-func containsIgnoreCase(s, substr string) bool {
-	if len(substr) == 0 {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
-	if len(s) < len(substr) {
-		return false
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
 	}
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if equalFoldAt(s, i, substr) {
-			return true
-		}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
 	}
 	return false
-}
-
-func equalFoldAt(s string, i int, substr string) bool {
-	for j := 0; j < len(substr); j++ {
-		c1 := s[i+j]
-		c2 := substr[j]
-		if c1 != c2 {
-			// Simple ASCII case folding
-			if c1 >= 'A' && c1 <= 'Z' {
-				c1 += 'a' - 'A'
-			}
-			if c2 >= 'A' && c2 <= 'Z' {
-				c2 += 'a' - 'A'
-			}
-			if c1 != c2 {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // minDuration returns the smaller of two durations.

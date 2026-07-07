@@ -75,6 +75,18 @@ type Conn struct {
 	// Close/Disconnect use it to abort a blocked read without waiting on mu,
 	// which prevents a hung hub from freezing every caller behind mu.
 	active atomic.Pointer[activeConn]
+
+	// inFlight counts real requests (execute/executeChunked) currently holding or
+	// waiting on mu. The resilient heartbeat consults it: a PING that queues
+	// behind an active request measures lock contention, not liveness, so a busy
+	// connection must not be torn down as "dead".
+	inFlight atomic.Int32
+}
+
+// Busy reports whether a real request is currently in flight. Used by the
+// resilient heartbeat to avoid mistaking lock contention for a dead connection.
+func (c *Conn) Busy() bool {
+	return c.inFlight.Load() > 0
 }
 
 // activeConn wraps a net.Conn so it can be stored in an atomic.Pointer.
@@ -281,6 +293,9 @@ func (c *Conn) handleErrorLocked() {
 
 // execute runs the request and returns the raw response.
 func (c *Conn) execute(verb string, args []string, data []byte) (*protocol.Response, error) {
+	c.inFlight.Add(1)
+	defer c.inFlight.Add(-1)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -305,6 +320,9 @@ func (c *Conn) execute(verb string, args []string, data []byte) (*protocol.Respo
 
 // executeChunked runs the request and collects chunked response data.
 func (c *Conn) executeChunked(verb string, args []string, data []byte) ([]byte, error) {
+	c.inFlight.Add(1)
+	defer c.inFlight.Add(-1)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -326,7 +344,11 @@ func (c *Conn) executeChunked(verb string, args []string, data []byte) ([]byte, 
 		resp, err := c.parser.ParseResponse()
 		if err != nil {
 			if err == io.EOF {
-				break
+				// EOF before an END marker means the hub died mid-stream: the
+				// buffer is incomplete. Returning it as success would silently
+				// hand back truncated data.
+				c.handleErrorLocked()
+				return nil, fmt.Errorf("connection closed mid-stream before END: %w", io.ErrUnexpectedEOF)
 			}
 			c.handleErrorLocked()
 			return nil, fmt.Errorf("failed to read response: %w", err)
@@ -343,8 +365,6 @@ func (c *Conn) executeChunked(verb string, args []string, data []byte) ([]byte, 
 			return nil, fmt.Errorf("unexpected response type: %s", resp.Type)
 		}
 	}
-
-	return result, nil
 }
 
 // RequestBuilder builds and executes requests to the hub.
@@ -354,6 +374,9 @@ type RequestBuilder struct {
 	verb string
 	args []string
 	data []byte
+	// buildErr defers a construction error (e.g. a failed WithJSON marshal) to
+	// execution, so the request is never silently sent without its payload.
+	buildErr error
 }
 
 // WithArgs appends additional string arguments to the request.
@@ -377,8 +400,10 @@ func (r *RequestBuilder) WithData(data []byte) *RequestBuilder {
 func (r *RequestBuilder) WithJSON(v interface{}) *RequestBuilder {
 	data, err := json.Marshal(v)
 	if err != nil {
-		// Store nil to signal error - execute will fail
-		r.data = nil
+		// Defer the error to execution instead of silently sending an empty
+		// payload (which would turn "PROC LIST with filter" into an unfiltered
+		// list).
+		r.buildErr = fmt.Errorf("failed to marshal request JSON: %w", err)
 		return r
 	}
 	r.data = data
@@ -390,6 +415,9 @@ func (r *RequestBuilder) WithJSON(v interface{}) *RequestBuilder {
 //
 //	err := conn.Request("PROC", "STOP", processID).OK()
 func (r *RequestBuilder) OK() error {
+	if r.buildErr != nil {
+		return r.buildErr
+	}
 	resp, err := r.conn.execute(r.verb, r.args, r.data)
 	if err != nil {
 		return err
@@ -408,6 +436,9 @@ func (r *RequestBuilder) OK() error {
 //	result, err := conn.Request("PROC", "LIST").JSON()
 //	processes := result["processes"].([]interface{})
 func (r *RequestBuilder) JSON() (map[string]interface{}, error) {
+	if r.buildErr != nil {
+		return nil, r.buildErr
+	}
 	resp, err := r.conn.execute(r.verb, r.args, r.data)
 	if err != nil {
 		return nil, err
@@ -434,6 +465,9 @@ func (r *RequestBuilder) JSON() (map[string]interface{}, error) {
 //	var info HubInfo
 //	err := conn.Request("INFO").JSONInto(&info)
 func (r *RequestBuilder) JSONInto(v interface{}) error {
+	if r.buildErr != nil {
+		return r.buildErr
+	}
 	resp, err := r.conn.execute(r.verb, r.args, r.data)
 	if err != nil {
 		return err
@@ -457,6 +491,9 @@ func (r *RequestBuilder) JSONInto(v interface{}) error {
 // Bytes executes the request and returns the raw JSON response bytes.
 // Use this when you need to handle JSON parsing yourself.
 func (r *RequestBuilder) Bytes() ([]byte, error) {
+	if r.buildErr != nil {
+		return nil, r.buildErr
+	}
 	resp, err := r.conn.execute(r.verb, r.args, r.data)
 	if err != nil {
 		return nil, err
@@ -474,6 +511,9 @@ func (r *RequestBuilder) Bytes() ([]byte, error) {
 //
 //	data, err := conn.Request("PROC", "OUTPUT", id).WithArgs("tail=100").Chunked()
 func (r *RequestBuilder) Chunked() ([]byte, error) {
+	if r.buildErr != nil {
+		return nil, r.buildErr
+	}
 	return r.conn.executeChunked(r.verb, r.args, r.data)
 }
 
