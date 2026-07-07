@@ -374,8 +374,8 @@ func (h *Hub) handleSessionRegister(conn *Connection, cmd *protocol.Command) err
 		Command:     cfg.Command,
 		Args:        cfg.Args,
 		StartedAt:   time.Now(),
-		LastSeen:    time.Now(),
 	}
+	session.SetLastSeen(time.Now())
 
 	h.sessions.Store(code, session)
 	conn.SetSessionCode(code)
@@ -410,7 +410,7 @@ func (h *Hub) handleSessionHeartbeat(conn *Connection, cmd *protocol.Command) er
 
 	if val, ok := h.sessions.Load(code); ok {
 		session := val.(*Session)
-		session.LastSeen = time.Now()
+		session.SetLastSeen(time.Now())
 	}
 
 	return conn.WriteOK("heartbeat")
@@ -426,7 +426,7 @@ func (h *Hub) handleSessionList(conn *Connection, cmd *protocol.Command) error {
 			"project_path": session.ProjectPath,
 			"command":      session.Command,
 			"started_at":   session.StartedAt.Format(time.RFC3339),
-			"last_seen":    session.LastSeen.Format(time.RFC3339),
+			"last_seen":    session.LastSeen().Format(time.RFC3339),
 		})
 		return true
 	})
@@ -452,7 +452,7 @@ func (h *Hub) handleSessionGet(conn *Connection, cmd *protocol.Command) error {
 		"command":      session.Command,
 		"args":         session.Args,
 		"started_at":   session.StartedAt.Format(time.RFC3339),
-		"last_seen":    session.LastSeen.Format(time.RFC3339),
+		"last_seen":    session.LastSeen().Format(time.RFC3339),
 	}
 
 	data, _ := json.Marshal(result)

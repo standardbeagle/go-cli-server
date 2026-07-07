@@ -228,6 +228,13 @@ func (h *Hub) Stop(ctx context.Context) error {
 		return true
 	})
 
+	// Stop all subprocesses (stdio children + health-check goroutines) before the
+	// process manager. Nothing else calls StopAll, so without this hub shutdown
+	// orphans every stdio child and leaks its health loop.
+	if h.subRouter != nil {
+		_ = h.subRouter.StopAll(ctx)
+	}
+
 	// Shutdown ProcessManager if enabled
 	if h.pm != nil {
 		_ = h.pm.Shutdown(ctx)
@@ -335,8 +342,8 @@ func (h *Hub) RegisterSession(code, projectPath string) {
 		Code:        code,
 		ProjectPath: projectPath,
 		StartedAt:   time.Now(),
-		LastSeen:    time.Now(),
 	}
+	session.SetLastSeen(time.Now())
 	h.sessions.Store(code, session)
 }
 
@@ -362,8 +369,18 @@ type Session struct {
 	Command     string
 	Args        []string
 	StartedAt   time.Time
-	LastSeen    time.Time
+
+	// lastSeen holds the heartbeat time as UnixNano. It is written by heartbeats
+	// and read concurrently by SESSION LIST/GET, so it must be accessed atomically
+	// rather than as a plain time.Time field.
+	lastSeen atomic.Int64
 }
+
+// SetLastSeen atomically records the session's last-seen time.
+func (s *Session) SetLastSeen(t time.Time) { s.lastSeen.Store(t.UnixNano()) }
+
+// LastSeen atomically returns the session's last-seen time.
+func (s *Session) LastSeen() time.Time { return time.Unix(0, s.lastSeen.Load()) }
 
 // ExternalProcess represents an external process connected for message relay.
 type ExternalProcess struct {
