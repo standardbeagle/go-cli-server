@@ -286,7 +286,9 @@ func (c *SubprocessConn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closer != nil {
-		return c.closer()
+		closer := c.closer
+		c.closer = nil
+		return closer()
 	}
 	return nil
 }

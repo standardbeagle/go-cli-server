@@ -5,6 +5,7 @@ import (
 	"net"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,6 +69,26 @@ func (s *pongServer) stop() {
 	}
 	s.mu.Unlock()
 	s.wg.Wait()
+}
+
+func TestSubprocessConn_CloseIdempotent(t *testing.T) {
+	var calls atomic.Int32
+	conn := &SubprocessConn{
+		closer: func() error {
+			calls.Add(1)
+			return nil
+		},
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("first Close() error = %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("closer calls = %d, want 1", got)
+	}
 }
 
 // TestManagedSubprocess_StopStartCycle verifies a subprocess can be started again
