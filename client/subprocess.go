@@ -36,16 +36,16 @@ type SubprocessServer struct {
 	// State
 	running atomic.Bool
 	// lifeMu serializes Start() and Stop() so their epoch swaps (running CAS,
-	// shutdown channel, listener, and the shared WaitGroup) can never interleave —
-	// which otherwise caused a double-close panic, a wrong-listener close, and a
-	// WaitGroup-reuse race under concurrent Start||Stop.
+	// shutdown channel, listener, and WaitGroup) can never interleave — which
+	// otherwise caused a double-close panic and a wrong-listener close.
 	lifeMu sync.Mutex
-	// shutdown is recreated on each Start and closed on Stop. shutMu guards the
-	// field itself so a restart's reassignment does not race readers in Wait() and
-	// handleConnection().
+	// shutMu guards shutdown and wg. Both are per-epoch: recreated on each Start.
+	// Giving each epoch its OWN WaitGroup means a prior epoch's in-flight
+	// wg.Wait() (a Stop whose ctx expired mid-drain) can never collide with the
+	// next epoch's wg.Add() — the reuse panic that a single shared WaitGroup risks.
 	shutMu   sync.Mutex
 	shutdown chan struct{}
-	wg       sync.WaitGroup
+	wg       *sync.WaitGroup
 }
 
 // currentShutdown returns the active shutdown channel under lock.
@@ -53,6 +53,13 @@ func (s *SubprocessServer) currentShutdown() chan struct{} {
 	s.shutMu.Lock()
 	defer s.shutMu.Unlock()
 	return s.shutdown
+}
+
+// currentWG returns the active epoch WaitGroup under lock.
+func (s *SubprocessServer) currentWG() *sync.WaitGroup {
+	s.shutMu.Lock()
+	defer s.shutMu.Unlock()
+	return s.wg
 }
 
 // SubprocessServerConfig configures a subprocess server.
@@ -89,6 +96,7 @@ func NewSubprocessServer(config SubprocessServerConfig) *SubprocessServer {
 		handlers:     make(map[string]CommandHandler),
 		verbRegistry: protocol.NewVerbRegistry(),
 		shutdown:     make(chan struct{}),
+		wg:           &sync.WaitGroup{},
 	}
 }
 
@@ -122,11 +130,14 @@ func (s *SubprocessServer) Start() error {
 		return fmt.Errorf("subprocess server already running")
 	}
 
-	// Reinstate a fresh shutdown channel. Stop() closed the previous one; without
-	// recreating it a restarted server's connection handlers would see the closed
-	// channel and exit immediately, so Start() would "succeed" onto a dead server.
+	// Reinstate a fresh shutdown channel AND a fresh WaitGroup for this epoch.
+	// Stop() closed the previous channel; a restarted server's handlers would
+	// otherwise see the closed channel and exit immediately. The fresh WaitGroup
+	// isolates this epoch's Add()s from any prior epoch's still-draining Wait().
+	epochWG := &sync.WaitGroup{}
 	s.shutMu.Lock()
 	s.shutdown = make(chan struct{})
+	s.wg = epochWG
 	s.shutMu.Unlock()
 
 	var listener net.Listener
@@ -149,10 +160,11 @@ func (s *SubprocessServer) Start() error {
 	}
 
 	s.listener = listener
-	s.wg.Add(1)
-	// Pass the listener to the accept loop so it operates on THIS epoch's listener
-	// rather than re-reading the shared field, which a later Start could reassign.
-	go s.acceptLoop(listener)
+	epochWG.Add(1)
+	// Pass the listener AND this epoch's WaitGroup to the accept loop so it operates
+	// on THIS epoch's resources rather than re-reading shared fields a later Start
+	// could reassign.
+	go s.acceptLoop(listener, epochWG)
 
 	return nil
 }
@@ -184,10 +196,13 @@ func (s *SubprocessServer) Stop(ctx context.Context) error {
 		return true
 	})
 
-	// Wait for goroutines with timeout
+	// Wait for goroutines with timeout, on THIS epoch's WaitGroup. If ctx expires
+	// mid-drain we drop lifeMu and return, but the next Start installs a brand-new
+	// WaitGroup, so this straggler wait cannot collide with the next epoch's Add.
+	epochWG := s.currentWG()
 	done := make(chan struct{})
 	go func() {
-		s.wg.Wait()
+		epochWG.Wait()
 		close(done)
 	}()
 
@@ -202,7 +217,7 @@ func (s *SubprocessServer) Stop(ctx context.Context) error {
 // Wait blocks until the server is stopped.
 func (s *SubprocessServer) Wait() {
 	<-s.currentShutdown()
-	s.wg.Wait()
+	s.currentWG().Wait()
 }
 
 // Address returns the actual address the server is listening on.
@@ -213,9 +228,10 @@ func (s *SubprocessServer) Address() string {
 	return s.listener.Addr().String()
 }
 
-// acceptLoop accepts incoming connections on the listener it was started with.
-func (s *SubprocessServer) acceptLoop(listener net.Listener) {
-	defer s.wg.Done()
+// acceptLoop accepts incoming connections on the listener and WaitGroup it was
+// started with (its epoch's resources).
+func (s *SubprocessServer) acceptLoop(listener net.Listener, wg *sync.WaitGroup) {
+	defer wg.Done()
 
 	for {
 		conn, err := listener.Accept()
@@ -236,6 +252,7 @@ func (s *SubprocessServer) acceptLoop(listener net.Listener) {
 			conn:   conn,
 			parser: protocol.NewParserWithRegistry(conn, s.verbRegistry),
 			writer: protocol.NewWriter(conn),
+			wg:     wg,
 		}
 
 		s.connections.Store(conn, sc)
@@ -244,7 +261,7 @@ func (s *SubprocessServer) acceptLoop(listener net.Listener) {
 			s.config.OnConnect()
 		}
 
-		s.wg.Add(1)
+		wg.Add(1)
 		go sc.handleConnection()
 	}
 }
@@ -256,10 +273,14 @@ type subprocessConn struct {
 	parser *protocol.Parser
 	writer *protocol.Writer
 	closed atomic.Bool
+	// wg is the epoch WaitGroup this connection belongs to (its Done pairs the
+	// Add in acceptLoop). Held directly so a Stop+Start swapping s.wg cannot make
+	// this Done() target the wrong epoch's group.
+	wg *sync.WaitGroup
 }
 
 func (c *subprocessConn) handleConnection() {
-	defer c.server.wg.Done()
+	defer c.wg.Done()
 	defer c.close()
 
 	// Capture the shutdown channel for this server epoch once, under lock, rather
