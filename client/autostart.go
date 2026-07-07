@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -188,10 +189,26 @@ func acquireStartupLock(lockPath string) (*os.File, error) {
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		if os.IsExist(err) {
-			// Lock file exists - check if it's stale (> 30 seconds old)
+			// Lock file exists. Decide staleness by the owner PID, not just age:
+			// a fresh lock always carries a live PID, so validating liveness stops
+			// this process from deleting another process's just-created lock (the
+			// remove-then-recreate TOCTOU where two clients each nuke the other's
+			// fresh lock and both spawn a hub).
+			data, readErr := os.ReadFile(lockPath)
+			if readErr == nil {
+				if pid, perr := strconv.Atoi(strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])); perr == nil {
+					if lockOwnerAlive(pid) {
+						return nil, fmt.Errorf("startup lock held by live process %d", pid)
+					}
+					// Owner is dead — reap the stale lock and retry.
+					os.Remove(lockPath)
+					return acquireStartupLock(lockPath)
+				}
+			}
+			// PID unreadable/unparseable: fall back to an age check so a corrupt
+			// lock cannot wedge startup forever.
 			info, statErr := os.Stat(lockPath)
 			if statErr == nil && time.Since(info.ModTime()) > 30*time.Second {
-				// Stale lock, remove and retry
 				os.Remove(lockPath)
 				return acquireStartupLock(lockPath)
 			}

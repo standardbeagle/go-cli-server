@@ -16,3 +16,12 @@ func setSysProcAttr(cmd *exec.Cmd) {
 		// The daemon still works without being a session leader
 	}
 }
+
+// lockOwnerAlive reports whether the startup-lock owner PID is still a live
+// process. Signal 0 probes existence without delivering anything.
+func lockOwnerAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
+}
