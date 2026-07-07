@@ -59,8 +59,11 @@ func (rb *RingBuffer) Write(p []byte) (n int, err error) {
 
 	pos := int(rb.writePos.Load()) % rb.capacity
 
-	// Check if this write will cause overflow
-	if rb.totalWritten.Load() > 0 && int(rb.totalWritten.Load()) >= rb.capacity {
+	// Check if this write will cause overflow. Include len(p): the write that
+	// first crosses capacity (totalWritten < cap, totalWritten+len > cap)
+	// overwrites the oldest bytes, so the flag must be set for that write too —
+	// not one write late.
+	if int(rb.totalWritten.Load())+len(p) > rb.capacity {
 		rb.overflowed.Store(true)
 	}
 

@@ -329,7 +329,11 @@ func (pm *ProcessManager) Shutdown(ctx context.Context) error {
 							errMu.Unlock()
 						}
 					} else {
-						if err := pm.Stop(ctx, p.ID); err != nil {
+						// Stop the exact process we hold, not pm.Stop(p.ID) which
+						// re-resolves by ID — ambiguous when two projects share a
+						// script name and could stop the wrong one (or double-stop
+						// one while its same-ID sibling escapes graceful shutdown).
+						if err := pm.StopProcess(ctx, p); err != nil {
 							errMu.Lock()
 							errs = append(errs, err)
 							errMu.Unlock()
@@ -519,9 +523,10 @@ func (pm *ProcessManager) performHealthCheck() {
 func (pm *ProcessManager) checkRunningProcess(proc *ManagedProcess) {
 	select {
 	case <-proc.done:
-		if proc.State() == StateRunning {
-			proc.SetState(StateFailed)
-		}
+		// CAS, not check-then-set: waitForProcess may transition this process
+		// concurrently, and a plain SetState would clobber the real terminal
+		// state (Stopped/Failed decided there) with a spurious Failed.
+		proc.CompareAndSwapState(StateRunning, StateFailed)
 	default:
 	}
 }
@@ -529,17 +534,19 @@ func (pm *ProcessManager) checkRunningProcess(proc *ManagedProcess) {
 func (pm *ProcessManager) checkStartingProcess(proc *ManagedProcess) {
 	start := proc.StartTime()
 	if start != nil && time.Since(*start) > 30*time.Second {
-		proc.SetState(StateFailed)
-		pm.IncrementFailed()
+		// CAS so a Starting→Running transition that lands between the read and
+		// the write is not overwritten — otherwise a healthy just-started
+		// process is wrongly marked Failed (with a spurious failure count).
+		if proc.CompareAndSwapState(StateStarting, StateFailed) {
+			pm.IncrementFailed()
+		}
 	}
 }
 
 func (pm *ProcessManager) checkStoppingProcess(proc *ManagedProcess) {
 	select {
 	case <-proc.done:
-		if proc.State() == StateStopping {
-			proc.SetState(StateStopped)
-		}
+		proc.CompareAndSwapState(StateStopping, StateStopped)
 	default:
 	}
 }
@@ -550,26 +557,46 @@ func (pm *ProcessManager) KillProcessByPort(ctx context.Context, port int) ([]in
 	if len(pids) == 0 {
 		return nil, nil
 	}
-	return pm.killProcesses(pids), nil
+	return pm.killProcesses(ctx, pids), nil
 }
 
-func (pm *ProcessManager) killProcesses(pids []int) []int {
+func (pm *ProcessManager) killProcesses(ctx context.Context, pids []int) []int {
 	var killedPids []int
 
-	// Phase 1: SIGTERM to process group + descendants for each PID
+	// Capture each PID's identity before signalling so the SIGKILL escalation
+	// can tell the original process from one the kernel recycled the PID into
+	// during the grace window.
+	identities := make(map[int]string, len(pids))
 	for _, pid := range pids {
-		pm.signalProcessGroup(pid, syscall.SIGTERM)
-		killedPids = append(killedPids, pid)
+		identities[pid] = processIdentity(pid)
 	}
 
-	// Phase 2: Wait for graceful exit
-	time.Sleep(3 * time.Second)
-
-	// Phase 3: SIGKILL escalation for survivors
+	// Phase 1: SIGTERM to process group + descendants. Only report a PID as
+	// killed if the signal was actually delivered (process still present).
 	for _, pid := range pids {
-		if isProcessAlive(pid) {
-			cleanupProcessTree(pid)
+		if err := pm.signalProcessGroup(pid, syscall.SIGTERM); err == nil {
+			killedPids = append(killedPids, pid)
 		}
+	}
+
+	// Phase 2: Wait for graceful exit, but honor cancellation instead of a hard
+	// 3s stall on the caller's goroutine (port preflight / shutdown hot paths).
+	select {
+	case <-ctx.Done():
+		return killedPids
+	case <-time.After(3 * time.Second):
+	}
+
+	// Phase 3: SIGKILL escalation for survivors — skip any PID whose identity no
+	// longer matches, i.e. the original exited and the PID was recycled.
+	for _, pid := range pids {
+		if !isProcessAlive(pid) {
+			continue
+		}
+		if id := identities[pid]; id != "" && processIdentity(pid) != id {
+			continue // recycled PID — not our target
+		}
+		cleanupProcessTree(pid)
 	}
 
 	return killedPids

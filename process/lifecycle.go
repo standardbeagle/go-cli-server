@@ -129,9 +129,15 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 		cleanupProcessGroup(pgid)
 	}
 
-	// Kill stored descendants from tracker (catches processes that died
-	// and were replaced between scans)
-	killStoredDescendants(storedDescendants)
+	// Kill stored descendants from the tracker (catches reparented grandchildren
+	// after the parent died) — but ONLY on an abnormal/killed exit. These are
+	// bare PIDs from a snapshot up to a scan-interval old; SIGKILLing them after
+	// a clean voluntary exit races the kernel recycling those PIDs into
+	// unrelated processes. A clean exit means the process managed its own
+	// lifetime; anything it deliberately left running is not ours to reap here.
+	if err != nil {
+		killStoredDescendants(storedDescendants)
+	}
 
 	// Cleanup platform-specific resources
 	if proc.cmd != nil && proc.cmd.Process != nil {
@@ -160,14 +166,28 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 		} else {
 			proc.exitCode.Store(-1)
 		}
-		proc.SetState(StateFailed)
-		pm.IncrementFailed()
 
-		if pm.scriptRegistry != nil {
-			if entry, ok := pm.scriptRegistry.GetByProcessID(proc.ID); ok {
-				entry.SetState(script.StateFailed)
-				entry.IncrementFailCount()
-				entry.SetLastError(err.Error())
+		// A process we deliberately stopped dies by signal, so cmd.Wait returns a
+		// non-nil ExitError with code -1 — but that is a normal stop, not a
+		// failure. If the state is already Stopping (set by StopProcess), settle
+		// to Stopped and do NOT inflate the failure counter. Only a process that
+		// died on its own (from Running/Starting) is a genuine failure.
+		if proc.CompareAndSwapState(StateStopping, StateStopped) {
+			if pm.scriptRegistry != nil {
+				if entry, ok := pm.scriptRegistry.GetByProcessID(proc.ID); ok {
+					entry.SetState(script.StateStopped)
+				}
+			}
+		} else {
+			proc.SetState(StateFailed)
+			pm.IncrementFailed()
+
+			if pm.scriptRegistry != nil {
+				if entry, ok := pm.scriptRegistry.GetByProcessID(proc.ID); ok {
+					entry.SetState(script.StateFailed)
+					entry.IncrementFailCount()
+					entry.SetLastError(err.Error())
+				}
 			}
 		}
 	} else {
@@ -315,10 +335,13 @@ func (pm *ProcessManager) Restart(ctx context.Context, id string) (*ManagedProce
 	newProc := NewManagedProcess(ProcessConfig{
 		ID:             id,
 		ProjectPath:    proc.ProjectPath,
+		WorkingDir:     proc.WorkingDir,
 		Command:        proc.Command,
 		Args:           proc.Args,
+		Env:            proc.Env,
 		Labels:         proc.Labels,
 		BufferSize:     proc.stdout.Cap(),
+		Timeout:        proc.timeout,
 		EnableStdin:    proc.stdinEnabled,
 		OutputCallback: proc.outputCallback,
 	})
