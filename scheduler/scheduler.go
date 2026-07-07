@@ -382,6 +382,9 @@ func (s *Scheduler) Schedule(targetID string, duration time.Duration, payload st
 	if duration <= 0 {
 		return nil, fmt.Errorf("duration must be positive")
 	}
+	if s.config.StateManager != nil && projectPath == "" {
+		return nil, fmt.Errorf("project path is required when task persistence is enabled")
+	}
 
 	// Validate target if validator is configured
 	if s.config.ValidateTarget != nil {

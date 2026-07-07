@@ -375,7 +375,7 @@ Client B: SSH STATUS server1 → routed to subprocess ssh
 // agnt/main.go
 func main() {
     // Connect to hub
-    hub := hubclient.Connect("/tmp/go-cli-server.sock")
+    hub := hubclient.Connect(socket.DefaultSocketPath(socket.DefaultSocketName))
 
     // Register capabilities
     hub.Register(hubclient.SubprocessConfig{

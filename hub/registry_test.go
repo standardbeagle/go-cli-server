@@ -61,6 +61,28 @@ func TestCommandRegistryMultipleCommands(t *testing.T) {
 	}
 }
 
+func TestCommandRegistryRejectsDuplicateVerb(t *testing.T) {
+	reg := NewCommandRegistry()
+
+	handler := func(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
+		return nil
+	}
+
+	if err := reg.Register(CommandDefinition{
+		Verb:    "TEST",
+		Handler: handler,
+	}); err != nil {
+		t.Fatalf("first Register error: %v", err)
+	}
+
+	if err := reg.Register(CommandDefinition{
+		Verb:    "test",
+		Handler: handler,
+	}); err == nil {
+		t.Fatal("expected error for duplicate verb registration")
+	}
+}
+
 func TestCommandRegistryRegisterEmpty(t *testing.T) {
 	reg := NewCommandRegistry()
 
@@ -127,6 +149,30 @@ func TestCommandRegistryValidSubVerbs(t *testing.T) {
 	}
 }
 
+func TestCommandRegistryValidSubVerbsReturnsCopy(t *testing.T) {
+	reg := NewCommandRegistry()
+
+	handler := func(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
+		return nil
+	}
+
+	if err := reg.Register(CommandDefinition{
+		Verb:     "PROC",
+		SubVerbs: []string{"STATUS", "OUTPUT"},
+		Handler:  handler,
+	}); err != nil {
+		t.Fatalf("Register error: %v", err)
+	}
+
+	subs := reg.ValidSubVerbs("PROC")
+	subs[0] = "MUTATED"
+
+	subs = reg.ValidSubVerbs("PROC")
+	if subs[0] != "STATUS" {
+		t.Fatalf("ValidSubVerbs exposed internal slice, got %q", subs[0])
+	}
+}
+
 func TestCommandRegistryRegisterSubHandler(t *testing.T) {
 	reg := NewCommandRegistry()
 
@@ -153,6 +199,31 @@ func TestCommandRegistryRegisterSubHandler(t *testing.T) {
 	err = reg.RegisterSubHandler("NONEXISTENT", "SUB", subHandler)
 	if err == nil {
 		t.Error("expected error for non-existent verb")
+	}
+}
+
+func TestCommandRegistryRejectsDuplicateSubHandler(t *testing.T) {
+	reg := NewCommandRegistry()
+
+	mainHandler := func(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
+		return nil
+	}
+	subHandler := func(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
+		return nil
+	}
+
+	if err := reg.Register(CommandDefinition{
+		Verb:    "TEST",
+		Handler: mainHandler,
+	}); err != nil {
+		t.Fatalf("Register error: %v", err)
+	}
+
+	if err := reg.RegisterSubHandler("TEST", "SPECIAL", subHandler); err != nil {
+		t.Fatalf("first RegisterSubHandler error: %v", err)
+	}
+	if err := reg.RegisterSubHandler("TEST", "special", subHandler); err == nil {
+		t.Fatal("expected error for duplicate sub-handler")
 	}
 }
 

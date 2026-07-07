@@ -145,6 +145,7 @@ LCI can run as a hub subprocess, receiving commands from the hub:
 import (
     "github.com/standardbeagle/go-cli-server/client"
     "github.com/standardbeagle/go-cli-server/protocol"
+    "github.com/standardbeagle/go-cli-server/socket"
 )
 
 // Create subprocess server
@@ -163,7 +164,7 @@ server.RegisterHandler("CONTEXT", handleContext)
 server.RegisterHandler("GIT-ANALYZE", handleGitAnalyze)
 
 // Start server and register with hub
-client.StartWithHub("/tmp/go-cli-server.sock",
+client.StartWithHub(socket.DefaultSocketPath(socket.DefaultSocketName),
     protocol.SubprocessRegisterConfig{
         ID:       "lci",
         Name:     "Lightning Code Index",

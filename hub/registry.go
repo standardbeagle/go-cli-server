@@ -28,7 +28,8 @@ type CommandDefinition struct {
 type verbHandler struct {
 	handler     CommandHandler // Default handler for the verb
 	subHandlers sync.Map       // subVerb -> CommandHandler
-	validSubs   []string       // List of valid sub-verbs
+	mu          sync.RWMutex
+	validSubs   []string // List of valid sub-verbs
 }
 
 // CommandRegistry manages command handlers with lock-free access.
@@ -67,7 +68,9 @@ func (r *CommandRegistry) Register(def CommandDefinition) error {
 		vh.subHandlers.Store(strings.ToUpper(sv), def.Handler)
 	}
 
-	r.handlers.Store(verb, vh)
+	if _, loaded := r.handlers.LoadOrStore(verb, vh); loaded {
+		return fmt.Errorf("command verb %s already registered", verb)
+	}
 
 	// Register verb with this hub's protocol parser.
 	r.protocol.RegisterVerb(verb)
@@ -89,8 +92,13 @@ func (r *CommandRegistry) RegisterSubHandler(verb, subVerb string, handler Comma
 	}
 
 	vh := val.(*verbHandler)
+	if _, exists := vh.subHandlers.Load(subVerb); exists {
+		return fmt.Errorf("sub-verb %s already registered for verb %s", subVerb, verb)
+	}
 	vh.subHandlers.Store(subVerb, handler)
-	vh.validSubs = append(vh.validSubs, subVerb)
+	vh.mu.Lock()
+	vh.validSubs = append(append([]string(nil), vh.validSubs...), subVerb)
+	vh.mu.Unlock()
 
 	r.protocol.RegisterSubVerb(subVerb)
 
@@ -119,8 +127,11 @@ func (r *CommandRegistry) Dispatch(ctx context.Context, conn *Connection, cmd *p
 			return subHandler.(CommandHandler)(ctx, conn, cmd)
 		}
 		// Reject unknown sub-verbs when the command declares valid ones
-		if len(vh.validSubs) > 0 {
-			return conn.WriteInvalidAction(cmd.Verb, cmd.SubVerb, vh.validSubs)
+		vh.mu.RLock()
+		validSubs := append([]string(nil), vh.validSubs...)
+		vh.mu.RUnlock()
+		if len(validSubs) > 0 {
+			return conn.WriteInvalidAction(cmd.Verb, cmd.SubVerb, validSubs)
 		}
 	}
 
@@ -152,5 +163,8 @@ func (r *CommandRegistry) ValidSubVerbs(verb string) []string {
 	if !ok {
 		return nil
 	}
-	return val.(*verbHandler).validSubs
+	vh := val.(*verbHandler)
+	vh.mu.RLock()
+	defer vh.mu.RUnlock()
+	return append([]string(nil), vh.validSubs...)
 }

@@ -100,3 +100,39 @@ func TestScheduler_NoRedelivery(t *testing.T) {
 		t.Errorf("delivery dispatched %d times, want exactly 1", got)
 	}
 }
+
+func TestScheduler_PersistentScheduleRequiresProjectPath(t *testing.T) {
+	s, err := New(Config{
+		StateManager: NewStateManager(DefaultStateConfig()),
+		DeliverFunc: func(ctx context.Context, targetID, payload string) error {
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Schedule("session-1", time.Hour, "hi", ""); err == nil {
+		t.Fatal("expected error for empty project path with persistence enabled")
+	}
+}
+
+func TestScheduler_InMemoryScheduleAllowsEmptyProjectPath(t *testing.T) {
+	s, err := New(Config{
+		TickInterval: time.Hour,
+		DeliverFunc: func(ctx context.Context, targetID, payload string) error {
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := s.Schedule("session-1", time.Hour, "hi", "")
+	if err != nil {
+		t.Fatalf("Schedule() unexpected error = %v", err)
+	}
+	if task.ProjectPath != "" {
+		t.Fatalf("ProjectPath = %q, want empty", task.ProjectPath)
+	}
+}
