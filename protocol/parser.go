@@ -52,27 +52,33 @@ var ErrFrameTooLarge = errors.New("frame exceeds maximum size without terminator
 
 // VerbRegistry tracks registered command verbs for validation.
 type VerbRegistry struct {
-	mu       sync.RWMutex
-	verbs    map[string]bool
-	subVerbs map[string]bool
+	mu             sync.RWMutex
+	verbs          map[string]bool
+	subVerbs       map[string]bool
+	subVerbsByVerb map[string]map[string]bool
 }
 
 // NewVerbRegistry creates a new verb registry with built-in verbs.
 func NewVerbRegistry() *VerbRegistry {
 	vr := &VerbRegistry{
-		verbs:    make(map[string]bool),
-		subVerbs: make(map[string]bool),
+		verbs:          make(map[string]bool),
+		subVerbs:       make(map[string]bool),
+		subVerbsByVerb: make(map[string]map[string]bool),
 	}
 	// Register built-in verbs. VerbScript was omitted, so every SCRIPT command was
 	// rejected at parse validation despite the hub registering a handler for it.
 	vr.RegisterVerb(VerbRun, VerbRunJSON, VerbProc,
 		VerbSession, VerbSubprocess, VerbScript, VerbPing, VerbInfo, VerbShutdown)
-	// Register built-in sub-verbs. SubVerbRestart (SCRIPT RESTART) was likewise
-	// declared but never registered.
-	vr.RegisterSubVerb(SubVerbStatus, SubVerbOutput, SubVerbStop, SubVerbList,
-		SubVerbCleanupPort, SubVerbStdin, SubVerbStream,
-		SubVerbRegister, SubVerbUnregister, SubVerbHeartbeat,
-		SubVerbGet, SubVerbStart, SubVerbClear, SubVerbSet, SubVerbRestart)
+	// Register built-in sub-verbs scoped to their verbs. A global sub-verb set
+	// makes commands like "RUN start build.sh" eat "start" as a sub-verb.
+	vr.RegisterSubVerbForVerb(VerbProc, SubVerbStatus, SubVerbOutput, SubVerbStop,
+		SubVerbList, SubVerbCleanupPort, SubVerbStdin, SubVerbStream)
+	vr.RegisterSubVerbForVerb(VerbSubprocess, SubVerbRegister, SubVerbUnregister,
+		SubVerbHeartbeat, SubVerbList, SubVerbStatus)
+	vr.RegisterSubVerbForVerb(VerbSession, SubVerbRegister, SubVerbUnregister,
+		SubVerbHeartbeat, SubVerbGet, SubVerbList)
+	vr.RegisterSubVerbForVerb(VerbScript, SubVerbList, SubVerbGet, SubVerbSet,
+		SubVerbClear, SubVerbRestart)
 	return vr
 }
 
@@ -94,6 +100,21 @@ func (vr *VerbRegistry) RegisterSubVerb(subVerbs ...string) {
 	}
 }
 
+// RegisterSubVerbForVerb adds sub-verbs that are valid only for the given verb.
+func (vr *VerbRegistry) RegisterSubVerbForVerb(verb string, subVerbs ...string) {
+	vr.mu.Lock()
+	defer vr.mu.Unlock()
+	verb = strings.ToUpper(verb)
+	if vr.subVerbsByVerb[verb] == nil {
+		vr.subVerbsByVerb[verb] = make(map[string]bool)
+	}
+	for _, sv := range subVerbs {
+		sv = strings.ToUpper(sv)
+		vr.subVerbsByVerb[verb][sv] = true
+		vr.subVerbs[sv] = true
+	}
+}
+
 // IsValidVerb checks if a verb is registered.
 func (vr *VerbRegistry) IsValidVerb(verb string) bool {
 	vr.mu.RLock()
@@ -106,6 +127,17 @@ func (vr *VerbRegistry) IsSubVerb(s string) bool {
 	vr.mu.RLock()
 	defer vr.mu.RUnlock()
 	return vr.subVerbs[strings.ToUpper(s)]
+}
+
+// IsSubVerbForVerb checks whether subVerb is registered for verb.
+func (vr *VerbRegistry) IsSubVerbForVerb(verb, subVerb string) bool {
+	vr.mu.RLock()
+	defer vr.mu.RUnlock()
+	subs := vr.subVerbsByVerb[strings.ToUpper(verb)]
+	if subs == nil {
+		return false
+	}
+	return subs[strings.ToUpper(subVerb)]
 }
 
 // ValidVerbs returns a list of all registered verbs.
@@ -211,7 +243,7 @@ func (p *Parser) ParseCommand() (*Command, error) {
 	// Parse subverb and args
 	if len(parts) > 1 {
 		subVerb := strings.ToUpper(parts[1])
-		if p.registry.IsSubVerb(subVerb) {
+		if p.registry.IsSubVerbForVerb(verb, subVerb) {
 			cmd.SubVerb = subVerb
 			cmd.Args = parts[2:]
 		} else {
@@ -293,7 +325,7 @@ func (p *Parser) readUntilTerminator(terminator string) (string, error) {
 			// than continuing (which would parse the remainder as a new frame).
 			if buf.Len() > 0 {
 				if err == io.EOF {
-					err = fmt.Errorf("unexpected EOF, missing terminator %q", terminator)
+					err = fmt.Errorf("unexpected EOF, missing terminator %q: %w", terminator, err)
 				}
 				return "", &PartialFrameError{Err: err}
 			}

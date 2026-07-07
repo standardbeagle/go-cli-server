@@ -118,6 +118,12 @@ func (sm *Manager) Listen() (net.Listener, error) {
 	return listener, nil
 }
 
+// Listen creates a listener. Windows does not need the restricted-runtime
+// syscall path used on Unix.
+func Listen(network, address string) (net.Listener, error) {
+	return net.Listen(network, address)
+}
+
 // Close closes the socket and removes files.
 func (sm *Manager) Close() error {
 	var errs []error

@@ -97,9 +97,9 @@ func TestParseCommandWithData(t *testing.T) {
 	// Build a command with base64-encoded JSON data
 	jsonData := []byte(`{"key": "value"}`)
 	cmd := &Command{
-		Verb:    "RUN-JSON",
-		Args:    nil,
-		Data:    jsonData,
+		Verb: "RUN-JSON",
+		Args: nil,
+		Data: jsonData,
 	}
 	encoded := FormatCommand(cmd)
 
@@ -299,6 +299,50 @@ func TestVerbRegistry(t *testing.T) {
 	reg.RegisterSubVerb("MYCUSTOM")
 	if !reg.IsSubVerb("MYCUSTOM") {
 		t.Error("expected MYCUSTOM to be valid after registration")
+	}
+}
+
+func TestParseCommandSubVerbsAreScopedByVerb(t *testing.T) {
+	parser := NewParser(bytes.NewReader([]byte("RUN START build.sh;;")))
+	cmd, err := parser.ParseCommand()
+	if err != nil {
+		t.Fatalf("ParseCommand error: %v", err)
+	}
+	if cmd.SubVerb != "" {
+		t.Fatalf("SubVerb = %q, want empty", cmd.SubVerb)
+	}
+	if len(cmd.Args) != 2 || cmd.Args[0] != "START" || cmd.Args[1] != "build.sh" {
+		t.Fatalf("Args = %#v, want [START build.sh]", cmd.Args)
+	}
+}
+
+func TestParseCommandCustomSubVerbScopedByVerb(t *testing.T) {
+	reg := NewVerbRegistry()
+	reg.RegisterVerb("FOO", "BAZ")
+	reg.RegisterSubVerbForVerb("FOO", "BAR")
+
+	parser := NewParserWithRegistry(bytes.NewReader([]byte("FOO BAR qux;;")), reg)
+	cmd, err := parser.ParseCommand()
+	if err != nil {
+		t.Fatalf("ParseCommand error: %v", err)
+	}
+	if cmd.SubVerb != "BAR" {
+		t.Fatalf("SubVerb = %q, want BAR", cmd.SubVerb)
+	}
+	if len(cmd.Args) != 1 || cmd.Args[0] != "qux" {
+		t.Fatalf("Args = %#v, want [qux]", cmd.Args)
+	}
+
+	parser = NewParserWithRegistry(bytes.NewReader([]byte("BAZ BAR qux;;")), reg)
+	cmd, err = parser.ParseCommand()
+	if err != nil {
+		t.Fatalf("ParseCommand error: %v", err)
+	}
+	if cmd.SubVerb != "" {
+		t.Fatalf("SubVerb = %q, want empty", cmd.SubVerb)
+	}
+	if len(cmd.Args) != 2 || cmd.Args[0] != "BAR" || cmd.Args[1] != "qux" {
+		t.Fatalf("Args = %#v, want [BAR qux]", cmd.Args)
 	}
 }
 

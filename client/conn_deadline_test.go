@@ -5,13 +5,15 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	hubsocket "github.com/standardbeagle/go-cli-server/socket"
 )
 
 // hangListener accepts connections and never responds, simulating a hung hub.
 func hangListener(t *testing.T) (string, func()) {
 	t.Helper()
 	sockPath := filepath.Join(t.TempDir(), "hang.sock")
-	l, err := net.Listen("unix", sockPath)
+	l, err := hubsocket.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}

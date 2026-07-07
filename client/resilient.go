@@ -152,11 +152,15 @@ func (rc *ResilientConn) Connect() error {
 		}
 	}
 
+	old := rc.conn
 	rc.conn = conn
 	rc.generation.Add(1)
 	rc.connected.Store(true)
 	now := time.Now()
 	rc.lastConnectTime.Store(&now)
+	if old != nil {
+		_ = old.Close()
+	}
 
 	// Start heartbeat monitor
 	rc.startHeartbeat()
@@ -240,6 +244,7 @@ func (rc *ResilientConn) WithConn(fn func(*Conn) error) error {
 
 	rc.connMu.RLock()
 	conn := rc.conn
+	gen := rc.generation.Load()
 	rc.connMu.RUnlock()
 
 	if conn == nil {
@@ -250,10 +255,17 @@ func (rc *ResilientConn) WithConn(fn func(*Conn) error) error {
 	if err != nil {
 		// Check if this is a connection error that should trigger reconnection
 		if isConnectionError(err) {
-			rc.triggerReconnect(err)
+			rc.triggerReconnectIfCurrent(gen, err)
 		}
 	}
 	return err
+}
+
+func (rc *ResilientConn) triggerReconnectIfCurrent(gen int64, err error) {
+	if gen != rc.generation.Load() {
+		return
+	}
+	rc.triggerReconnect(err)
 }
 
 // startHeartbeat starts the heartbeat monitoring goroutine.

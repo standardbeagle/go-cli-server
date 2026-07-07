@@ -4,12 +4,14 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/protocol"
+	hubsocket "github.com/standardbeagle/go-cli-server/socket"
 )
 
 // pongServer is a minimal subprocess server that answers PING with PONG and
@@ -23,7 +25,7 @@ type pongServer struct {
 
 func startPongServer(t *testing.T, sockPath string) *pongServer {
 	t.Helper()
-	ln, err := net.Listen("unix", sockPath)
+	ln, err := hubsocket.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -290,7 +292,7 @@ func TestSubprocessRouter_GetRoutes(t *testing.T) {
 		Name: "Test",
 		Commands: []string{
 			"PROXY *",
-			"SESSION GET",
+			"EXPORT GET",
 			"EXACT MATCH",
 		},
 	}
@@ -305,11 +307,51 @@ func TestSubprocessRouter_GetRoutes(t *testing.T) {
 	}
 
 	// Check exact routes
-	if _, ok := routes["SESSION GET"]; !ok {
-		t.Error("Missing SESSION GET exact route")
+	if _, ok := routes["EXPORT GET"]; !ok {
+		t.Error("Missing EXPORT GET exact route")
 	}
 	if _, ok := routes["EXACT MATCH"]; !ok {
 		t.Error("Missing EXACT MATCH exact route")
+	}
+}
+
+func TestSubprocessRouter_RejectsHubVerbCollision(t *testing.T) {
+	hub := New(Config{})
+	router := NewSubprocessRouter(hub)
+
+	err := router.Register(&ManagedSubprocess{
+		ID:       "shadow",
+		Name:     "Shadow",
+		Commands: []string{"SESSION EXPORT"},
+	})
+	if err == nil {
+		t.Fatal("expected hub verb collision error")
+	}
+}
+
+func TestSubprocessRouter_MultiWordWildcardRegistersSubVerb(t *testing.T) {
+	hub := New(Config{})
+	router := NewSubprocessRouter(hub)
+
+	err := router.Register(&ManagedSubprocess{
+		ID:       "multi",
+		Name:     "Multi",
+		Commands: []string{"FOO BAR *"},
+	})
+	if err != nil {
+		t.Fatalf("Register error: %v", err)
+	}
+
+	parser := protocol.NewParserWithRegistry(strings.NewReader("FOO BAR baz;;"), hub.protocolRegistry)
+	cmd, err := parser.ParseCommand()
+	if err != nil {
+		t.Fatalf("ParseCommand error: %v", err)
+	}
+	if cmd.SubVerb != "BAR" {
+		t.Fatalf("SubVerb = %q, want BAR", cmd.SubVerb)
+	}
+	if len(cmd.Args) != 1 || cmd.Args[0] != "baz" {
+		t.Fatalf("Args = %#v, want [baz]", cmd.Args)
 	}
 }
 
@@ -458,7 +500,7 @@ func TestSubprocessRouter_ConcurrentRegisterRoute(t *testing.T) {
 				id := "sp-" + string(rune('a'+w))
 				sp := &ManagedSubprocess{
 					ID:       id,
-					Commands: []string{"PROXY *", "SESSION GET"},
+					Commands: []string{"PROXY *", "EXPORT GET"},
 				}
 				_ = router.Register(sp)
 				_ = router.Unregister(id)

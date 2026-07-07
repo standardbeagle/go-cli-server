@@ -314,6 +314,10 @@ func (r *SubprocessRouter) Register(sp *ManagedSubprocess) error {
 	if sp.ID == "" {
 		return fmt.Errorf("subprocess ID is required")
 	}
+
+	r.rebuildMu.Lock()
+	defer r.rebuildMu.Unlock()
+
 	if err := r.validateRoutePatterns(sp); err != nil {
 		return err
 	}
@@ -330,7 +334,7 @@ func (r *SubprocessRouter) Register(sp *ManagedSubprocess) error {
 	if _, loaded := r.subprocesses.LoadOrStore(sp.ID, sp); loaded {
 		return fmt.Errorf("subprocess %q already registered", sp.ID)
 	}
-	r.rebuildRoutes()
+	r.rebuildRoutesLocked()
 
 	return nil
 }
@@ -358,6 +362,9 @@ func (r *SubprocessRouter) validateRoutePatterns(sp *ManagedSubprocess) error {
 		}
 		if len(fields) > 2 {
 			return fmt.Errorf("command pattern %q is unroutable: only verb or verb+subverb patterns are supported", raw)
+		}
+		if r.hub.commands.HasVerb(fields[0]) {
+			return fmt.Errorf("command pattern %q collides with hub command verb %q", raw, fields[0])
 		}
 
 		routeKey := kind + "\x00" + strings.Join(fields, " ")
@@ -448,7 +455,10 @@ func (r *SubprocessRouter) List() []*ManagedSubprocess {
 func (r *SubprocessRouter) rebuildRoutes() {
 	r.rebuildMu.Lock()
 	defer r.rebuildMu.Unlock()
+	r.rebuildRoutesLocked()
+}
 
+func (r *SubprocessRouter) rebuildRoutesLocked() {
 	exact := make(map[string]string)
 	prefix := make(map[string]string)
 
@@ -465,8 +475,12 @@ func (r *SubprocessRouter) rebuildRoutes() {
 				p := strings.Join(strings.Fields(strings.TrimSuffix(pattern, "*")), " ")
 				prefix[p] = sp.ID
 				// Register the verb so the parser accepts it and reaches dispatch.
-				if p != "" {
-					r.hub.protocolRegistry.RegisterVerb(strings.Fields(p)[0])
+				fields := strings.Fields(p)
+				if len(fields) > 0 {
+					r.hub.protocolRegistry.RegisterVerb(fields[0])
+				}
+				if len(fields) > 1 {
+					r.hub.protocolRegistry.RegisterSubVerbForVerb(fields[0], fields[1])
 				}
 			} else {
 				pattern = strings.Join(strings.Fields(pattern), " ")
@@ -478,7 +492,7 @@ func (r *SubprocessRouter) rebuildRoutes() {
 					r.hub.protocolRegistry.RegisterVerb(fields[0])
 				}
 				if len(fields) > 1 {
-					r.hub.protocolRegistry.RegisterSubVerb(fields[1])
+					r.hub.protocolRegistry.RegisterSubVerbForVerb(fields[0], fields[1])
 				}
 			}
 		}
@@ -555,10 +569,10 @@ func (r *SubprocessRouter) routeToSubprocess(ctx context.Context, conn *Connecti
 	// Mark the connection busy so a concurrent health PING skips instead of
 	// blocking on mu behind this command and mistaking the wait for a failure.
 	spConn.inFlight.Add(1)
+	defer spConn.inFlight.Add(-1)
 	err := spConn.SendCommandStream(ctx, cmd, func(resp *protocol.Response) error {
 		return r.relayResponse(conn, resp)
 	})
-	spConn.inFlight.Add(-1)
 	if err != nil {
 		sp.commandsFailed.Add(1)
 		r.totalFailed.Add(1)

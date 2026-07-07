@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -338,7 +339,10 @@ func (h *Hub) handleScriptStop(ctx context.Context, conn *Connection, cmd *proto
 	}
 
 	proc, err := h.pm.GetByPath(entry.ProcessID, entry.ProjectPath)
-	if err != nil || !proc.IsRunning() {
+	if err != nil && !errors.Is(err, process.ErrProcessNotFound) {
+		return conn.WriteInternalErr(fmt.Sprintf("failed to look up process: %v", err))
+	}
+	if errors.Is(err, process.ErrProcessNotFound) || !proc.IsRunning() {
 		entry.SetState(script.StateStopped)
 		resp := map[string]any{
 			"name":       name,

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/protocol"
+	hubsocket "github.com/standardbeagle/go-cli-server/socket"
 )
 
 // SubprocessServer allows an application to act as a hub subprocess.
@@ -150,9 +151,9 @@ func (s *SubprocessServer) Start() error {
 			s.running.Store(false)
 			return err
 		}
-		listener, err = net.Listen("unix", s.config.Transport.Address)
+		listener, err = hubsocket.Listen("unix", s.config.Transport.Address)
 	case "tcp":
-		listener, err = net.Listen("tcp", s.config.Transport.Address)
+		listener, err = hubsocket.Listen("tcp", s.config.Transport.Address)
 	default:
 		s.running.Store(false) // roll back the CAS so a retry can start
 		return fmt.Errorf("unsupported transport type: %s", s.config.Transport.Type)

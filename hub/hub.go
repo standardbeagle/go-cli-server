@@ -28,6 +28,14 @@ type Config struct {
 	WriteTimeout time.Duration
 	// EnableProcessMgmt enables the built-in ProcessManager.
 	EnableProcessMgmt bool
+	// EnableProcessCommands registers built-in PROC/RUN/RUN-JSON handlers.
+	// Library consumers that provide their own command surface should leave this
+	// false and register handlers explicitly.
+	EnableProcessCommands bool
+	// EnableScriptCommands registers built-in SCRIPT handlers.
+	EnableScriptCommands bool
+	// EnableSessionCommands registers built-in SESSION handlers.
+	EnableSessionCommands bool
 	// ProcessConfig is configuration for the ProcessManager (if enabled).
 	ProcessConfig process.ManagerConfig
 	// Version is the hub version string for INFO responses.
@@ -127,8 +135,9 @@ func New(config Config) *Hub {
 
 // registerBuiltinCommands registers the core hub commands.
 func (h *Hub) registerBuiltinCommands() {
-	// PROC command (if ProcessManager enabled)
-	if h.pm != nil {
+	// PROC/RUN commands are opt-in. Consumers often provide richer handlers under
+	// these verbs; registering thin defaults here would shadow them.
+	if h.pm != nil && h.config.EnableProcessCommands {
 		_ = h.commands.Register(CommandDefinition{
 			Verb:     "PROC",
 			SubVerbs: []string{"STATUS", "OUTPUT", "STOP", "LIST", "CLEANUP-PORT", "STDIN"},
@@ -146,8 +155,8 @@ func (h *Hub) registerBuiltinCommands() {
 		})
 	}
 
-	// SCRIPT command (if ProcessManager enabled; registry checked at call time)
-	if h.pm != nil {
+	// SCRIPT command is opt-in for the same reason as PROC/RUN.
+	if h.pm != nil && h.config.EnableScriptCommands {
 		_ = h.commands.Register(CommandDefinition{
 			Verb:     "SCRIPT",
 			SubVerbs: []string{"LIST", "GET", "OUTPUT", "RESTART", "STOP"},
@@ -155,12 +164,13 @@ func (h *Hub) registerBuiltinCommands() {
 		})
 	}
 
-	// SESSION command
-	_ = h.commands.Register(CommandDefinition{
-		Verb:     "SESSION",
-		SubVerbs: []string{"REGISTER", "UNREGISTER", "HEARTBEAT", "LIST", "GET"},
-		Handler:  h.handleSession,
-	})
+	if h.config.EnableSessionCommands {
+		_ = h.commands.Register(CommandDefinition{
+			Verb:     "SESSION",
+			SubVerbs: []string{"REGISTER", "UNREGISTER", "HEARTBEAT", "LIST", "GET"},
+			Handler:  h.handleSession,
+		})
+	}
 
 	// SUBPROCESS commands (via SubprocessRouter)
 	h.subRouter.RegisterSubprocessCommands()

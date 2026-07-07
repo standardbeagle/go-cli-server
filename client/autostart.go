@@ -98,8 +98,11 @@ func (c *AutoStartConn) startHub() error {
 	lockPath := c.config.SocketPath + ".startup.lock"
 	lockFile, err := acquireStartupLock(lockPath)
 	if err != nil {
-		// Another process is starting the hub, just wait for it
-		return nil
+		if errors.Is(err, errStartupLockHeld) {
+			// Another process is starting the hub; wait for it below.
+			return nil
+		}
+		return err
 	}
 	defer releaseStartupLock(lockFile, lockPath)
 
@@ -226,13 +229,13 @@ func acquireStartupLock(lockPath string) (*os.File, error) {
 func releaseStartupLock(f *os.File, lockPath string) {
 	if f != nil {
 		own, statErr := f.Stat()
-		_ = unlockStartupFile(f)
-		f.Close()
 		if statErr == nil {
 			if info, err := os.Stat(lockPath); err == nil && os.SameFile(info, own) {
-				os.Remove(lockPath)
+				_ = os.Remove(lockPath)
 			}
 		}
+		_ = unlockStartupFile(f)
+		f.Close()
 	}
 }
 

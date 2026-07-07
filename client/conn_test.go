@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/protocol"
+	hubsocket "github.com/standardbeagle/go-cli-server/socket"
 )
 
 // TestNewConn verifies connection creation with options.
@@ -135,7 +136,7 @@ func TestWithRealSocket(t *testing.T) {
 	sockPath := filepath.Join(tmpDir, "test.sock")
 
 	// Create a mock server
-	listener, err := net.Listen("unix", sockPath)
+	listener, err := hubsocket.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("Failed to create test socket: %v", err)
 	}
@@ -195,7 +196,7 @@ func handleMockConnection(conn net.Conn) {
 
 	// Register TEST verb so parser recognizes it
 	protocol.DefaultRegistry.RegisterVerb("TEST")
-	protocol.DefaultRegistry.RegisterSubVerb("OK", "ERROR", "JSON", "CHUNKED", "ECHO")
+	protocol.DefaultRegistry.RegisterSubVerbForVerb("TEST", "OK", "ERROR", "JSON", "CHUNKED", "ECHO")
 
 	parser := protocol.NewParser(conn)
 	writer := protocol.NewWriter(conn)
@@ -261,7 +262,7 @@ func TestRequestBuilder(t *testing.T) {
 	tmpDir := t.TempDir()
 	sockPath := filepath.Join(tmpDir, "builder.sock")
 
-	listener, err := net.Listen("unix", sockPath)
+	listener, err := hubsocket.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("Failed to create test socket: %v", err)
 	}
@@ -421,7 +422,7 @@ func TestConcurrentRequests(t *testing.T) {
 	tmpDir := t.TempDir()
 	sockPath := filepath.Join(tmpDir, "concurrent.sock")
 
-	listener, err := net.Listen("unix", sockPath)
+	listener, err := hubsocket.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("Failed to create test socket: %v", err)
 	}
@@ -586,7 +587,7 @@ func BenchmarkPing(b *testing.B) {
 	tmpDir := b.TempDir()
 	sockPath := filepath.Join(tmpDir, "bench.sock")
 
-	listener, err := net.Listen("unix", sockPath)
+	listener, err := hubsocket.Listen("unix", sockPath)
 	if err != nil {
 		b.Fatalf("Failed to create test socket: %v", err)
 	}
@@ -618,7 +619,7 @@ func BenchmarkJSONRequest(b *testing.B) {
 	tmpDir := b.TempDir()
 	sockPath := filepath.Join(tmpDir, "bench.sock")
 
-	listener, err := net.Listen("unix", sockPath)
+	listener, err := hubsocket.Listen("unix", sockPath)
 	if err != nil {
 		b.Fatalf("Failed to create test socket: %v", err)
 	}

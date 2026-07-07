@@ -143,7 +143,7 @@ func (sm *Manager) Listen() (net.Listener, error) {
 	// RUN executes arbitrary commands, so a world-connectable socket — even for the
 	// brief window between Listen and Chmod — is a local-privilege hole.
 	oldMask := syscall.Umask(0o177)
-	listener, err := net.Listen("unix", sm.config.Path)
+	listener, err := Listen("unix", sm.config.Path)
 	syscall.Umask(oldMask)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create socket: %w", err)
@@ -164,6 +164,92 @@ func (sm *Manager) Listen() (net.Listener, error) {
 	sm.listener = listener
 	sm.owned = true
 	return listener, nil
+}
+
+// Listen creates a listener without Go's default SO_REUSEADDR setup. Some
+// restricted runtimes deny that setsockopt even for AF_UNIX sockets where it is
+// unnecessary, causing net.Listen to fail before bind. Use this helper for
+// project-owned listeners that need to run in those environments.
+func Listen(network, address string) (net.Listener, error) {
+	switch network {
+	case "unix":
+		return listenUnix(address)
+	case "tcp", "tcp4":
+		return listenTCP4(address)
+	default:
+		return net.Listen(network, address)
+	}
+}
+
+func listenUnix(path string) (net.Listener, error) {
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		return nil, os.NewSyscallError("socket", err)
+	}
+	syscall.CloseOnExec(fd)
+
+	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: path}); err != nil {
+		_ = syscall.Close(fd)
+		return nil, os.NewSyscallError("bind", err)
+	}
+	if err := syscall.Listen(fd, listenerBacklog()); err != nil {
+		_ = syscall.Close(fd)
+		return nil, os.NewSyscallError("listen", err)
+	}
+	return fileListener(fd, path)
+}
+
+func listenTCP4(address string) (net.Listener, error) {
+	addr, err := net.ResolveTCPAddr("tcp4", address)
+	if err != nil {
+		return nil, err
+	}
+	ip := addr.IP.To4()
+	if ip == nil {
+		if addr.IP == nil || addr.IP.IsUnspecified() {
+			ip = net.IPv4zero.To4()
+		} else {
+			return nil, fmt.Errorf("address %q is not IPv4", address)
+		}
+	}
+
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		return nil, os.NewSyscallError("socket", err)
+	}
+	syscall.CloseOnExec(fd)
+
+	sa := &syscall.SockaddrInet4{Port: addr.Port}
+	copy(sa.Addr[:], ip)
+	if err := syscall.Bind(fd, sa); err != nil {
+		_ = syscall.Close(fd)
+		return nil, os.NewSyscallError("bind", err)
+	}
+	if err := syscall.Listen(fd, listenerBacklog()); err != nil {
+		_ = syscall.Close(fd)
+		return nil, os.NewSyscallError("listen", err)
+	}
+	return fileListener(fd, address)
+}
+
+func fileListener(fd int, name string) (net.Listener, error) {
+	file := os.NewFile(uintptr(fd), name)
+	if file == nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("failed to wrap listener fd")
+	}
+	defer file.Close()
+
+	listener, err := net.FileListener(file)
+	if err != nil {
+		_ = syscall.Close(fd)
+		return nil, err
+	}
+	return listener, nil
+}
+
+func listenerBacklog() int {
+	return syscall.SOMAXCONN
 }
 
 // Close closes the socket and removes files.

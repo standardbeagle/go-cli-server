@@ -400,9 +400,9 @@ func TestCleanupStaleSocket(t *testing.T) {
 	sockPath := filepath.Join(tmpDir, "stale.sock")
 
 	// Create a socket and close it without cleanup
-	listener, err := net.Listen("unix", sockPath)
+	listener, err := Listen("unix", sockPath)
 	if err != nil {
-		t.Fatalf("net.Listen() error = %v", err)
+		t.Fatalf("Listen() error = %v", err)
 	}
 	listener.Close()
 
@@ -853,9 +853,9 @@ func TestConnectionRefusedDetection(t *testing.T) {
 	// This is tricky - we need to trigger ECONNREFUSED
 	// Create a socket, close it, then try to connect
 
-	listener, err := net.Listen("unix", sockPath)
+	listener, err := Listen("unix", sockPath)
 	if err != nil {
-		t.Fatalf("net.Listen() error = %v", err)
+		t.Fatalf("Listen() error = %v", err)
 	}
 	listener.Close()
 

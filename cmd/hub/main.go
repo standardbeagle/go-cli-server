@@ -69,6 +69,9 @@ func main() {
 	config.SocketName = *socketName
 	config.MaxClients = *maxClients
 	config.EnableProcessMgmt = *enableProc
+	config.EnableProcessCommands = *enableProc
+	config.EnableScriptCommands = *enableProc
+	config.EnableSessionCommands = true
 	config.Version = version
 
 	// Create and start hub

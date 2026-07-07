@@ -75,7 +75,7 @@ func (r *CommandRegistry) Register(def CommandDefinition) error {
 	// Register verb with this hub's protocol parser.
 	r.protocol.RegisterVerb(verb)
 	for _, sv := range def.SubVerbs {
-		r.protocol.RegisterSubVerb(sv)
+		r.protocol.RegisterSubVerbForVerb(verb, sv)
 	}
 
 	return nil
@@ -100,7 +100,7 @@ func (r *CommandRegistry) RegisterSubHandler(verb, subVerb string, handler Comma
 	vh.validSubs = append(append([]string(nil), vh.validSubs...), subVerb)
 	vh.mu.Unlock()
 
-	r.protocol.RegisterSubVerb(subVerb)
+	r.protocol.RegisterSubVerbForVerb(verb, subVerb)
 
 	return nil
 }

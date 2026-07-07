@@ -516,9 +516,12 @@ func TestConcurrentClients(t *testing.T) {
 	}
 }
 
-// TestBuiltinCommandsRegistered verifies built-in commands are registered.
+// TestBuiltinCommandsRegistered verifies built-in commands are opt-in.
 func TestBuiltinCommandsRegistered(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.EnableProcessCommands = true
+	cfg.EnableScriptCommands = true
+	cfg.EnableSessionCommands = true
 	h := New(cfg)
 
 	// PROC should be registered when ProcessMgmt is enabled
@@ -539,10 +542,30 @@ func TestBuiltinCommandsRegistered(t *testing.T) {
 	}
 }
 
+func TestBuiltinCommandsNotRegisteredByDefault(t *testing.T) {
+	cfg := DefaultConfig()
+	h := New(cfg)
+
+	if h.commands.HasVerb("PROC") {
+		t.Error("PROC command should not be registered by default")
+	}
+	if h.commands.HasVerb("RUN") {
+		t.Error("RUN command should not be registered by default")
+	}
+	if h.commands.HasVerb("SESSION") {
+		t.Error("SESSION command should not be registered by default")
+	}
+	if !h.commands.HasVerb("SUBPROCESS") {
+		t.Error("SUBPROCESS command should be registered")
+	}
+}
+
 // TestBuiltinCommandsWithoutProcessMgmt verifies PROC/RUN not registered when disabled.
 func TestBuiltinCommandsWithoutProcessMgmt(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.EnableProcessMgmt = false
+	cfg.EnableProcessCommands = true
+	cfg.EnableSessionCommands = true
 	h := New(cfg)
 
 	// PROC should NOT be registered
@@ -673,6 +696,7 @@ func TestProcListEmpty(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.SocketPath = sockPath
+	cfg.EnableProcessCommands = true
 
 	h := New(cfg)
 	if err := h.Start(); err != nil {
@@ -715,6 +739,7 @@ func TestProcStatusNotFound(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.SocketPath = sockPath
+	cfg.EnableProcessCommands = true
 
 	h := New(cfg)
 	if err := h.Start(); err != nil {
@@ -758,6 +783,7 @@ func TestProcStopNotFound(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.SocketPath = sockPath
+	cfg.EnableProcessCommands = true
 
 	h := New(cfg)
 	if err := h.Start(); err != nil {
@@ -807,6 +833,7 @@ func TestProcOutputNotFound(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.SocketPath = sockPath
+	cfg.EnableProcessCommands = true
 
 	h := New(cfg)
 	if err := h.Start(); err != nil {
@@ -850,6 +877,7 @@ func TestProcInvalidSubcommand(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.SocketPath = sockPath
+	cfg.EnableProcessCommands = true
 
 	h := New(cfg)
 	if err := h.Start(); err != nil {
@@ -893,6 +921,7 @@ func TestProcNoSubcommand(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.SocketPath = sockPath
+	cfg.EnableProcessCommands = true
 
 	h := New(cfg)
 	if err := h.Start(); err != nil {
@@ -941,6 +970,7 @@ func TestSessionList(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SocketPath = sockPath
 	cfg.EnableProcessMgmt = false
+	cfg.EnableSessionCommands = true
 
 	h := New(cfg)
 	if err := h.Start(); err != nil {
@@ -984,6 +1014,7 @@ func TestSessionRegisterAndGet(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SocketPath = sockPath
 	cfg.EnableProcessMgmt = false
+	cfg.EnableSessionCommands = true
 
 	h := New(cfg)
 	if err := h.Start(); err != nil {
@@ -1054,6 +1085,7 @@ func TestSessionGetNotFound(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SocketPath = sockPath
 	cfg.EnableProcessMgmt = false
+	cfg.EnableSessionCommands = true
 
 	h := New(cfg)
 	if err := h.Start(); err != nil {
@@ -1098,6 +1130,7 @@ func TestSessionHeartbeat(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SocketPath = sockPath
 	cfg.EnableProcessMgmt = false
+	cfg.EnableSessionCommands = true
 
 	h := New(cfg)
 	if err := h.Start(); err != nil {
@@ -1147,6 +1180,7 @@ func TestSessionUnregister(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SocketPath = sockPath
 	cfg.EnableProcessMgmt = false
+	cfg.EnableSessionCommands = true
 
 	h := New(cfg)
 	if err := h.Start(); err != nil {
@@ -1196,6 +1230,7 @@ func TestSessionNoSubcommand(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SocketPath = sockPath
 	cfg.EnableProcessMgmt = false
+	cfg.EnableSessionCommands = true
 
 	h := New(cfg)
 	if err := h.Start(); err != nil {
