@@ -179,6 +179,18 @@ func (sm *Manager) checkExisting() error {
 	}
 
 	if !sm.isOurDaemonProcess(pid) {
+		// Without a ProcessMatcher we cannot prove this PID belongs to us, so we
+		// must not delete the PID file before checking the socket. A duplicate hub
+		// start against a live daemon would otherwise remove the live daemon's PID
+		// file every time, disabling future stale-process detection.
+		conn, err := net.DialTimeout("unix", sm.config.Path, 500*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return ErrDaemonRunning
+		}
+		// The PID is live but not identifiable as ours, and the socket is not
+		// accepting connections. Do not terminate the PID; only drop our stale
+		// metadata so cleanupStale can remove the dead socket file.
 		os.Remove(sm.pidFile)
 		return nil
 	}

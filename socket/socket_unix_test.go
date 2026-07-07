@@ -547,19 +547,19 @@ func TestConcurrentConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
-	defer m.Close()
-
 	// Handle connections
-	var wg sync.WaitGroup
+	var handlerWg sync.WaitGroup
+	acceptDone := make(chan struct{})
 	go func() {
+		defer close(acceptDone)
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
-			wg.Add(1)
+			handlerWg.Add(1)
 			go func(c net.Conn) {
-				defer wg.Done()
+				defer handlerWg.Done()
 				defer c.Close()
 				buf := make([]byte, 10)
 				_, _ = c.Read(buf)
@@ -593,7 +593,9 @@ func TestConcurrentConnections(t *testing.T) {
 		t.Errorf("Concurrent connection error: %v", err)
 	}
 
-	wg.Wait()
+	_ = m.Close()
+	<-acceptDone
+	handlerWg.Wait()
 }
 
 // TestListenCreatesDirectory verifies that Listen creates the socket directory.
@@ -684,6 +686,16 @@ func TestCleanupZombieDaemonsNoOp(t *testing.T) {
 		return false // No processes match
 	})
 
+	if cleaned != 0 {
+		t.Errorf("CleanupZombieDaemons() = %d, want 0", cleaned)
+	}
+}
+
+func TestCleanupZombieDaemonsNoPIDNoMatcherNoScan(t *testing.T) {
+	tmpDir := t.TempDir()
+	sockPath := filepath.Join(tmpDir, "no-pid.sock")
+
+	cleaned := CleanupZombieDaemons(sockPath, nil)
 	if cleaned != 0 {
 		t.Errorf("CleanupZombieDaemons() = %d, want 0", cleaned)
 	}

@@ -464,7 +464,7 @@ func (r *SubprocessRouter) rebuildRoutes() {
 				prefix[p] = sp.ID
 				// Register the verb so the parser accepts it and reaches dispatch.
 				if p != "" {
-					protocol.DefaultRegistry.RegisterVerb(strings.Fields(p)[0])
+					r.hub.protocolRegistry.RegisterVerb(strings.Fields(p)[0])
 				}
 			} else {
 				pattern = strings.Join(strings.Fields(pattern), " ")
@@ -473,10 +473,10 @@ func (r *SubprocessRouter) rebuildRoutes() {
 				// the command survives parsing and reaches routeToSubprocess.
 				fields := strings.Fields(pattern)
 				if len(fields) > 0 {
-					protocol.DefaultRegistry.RegisterVerb(fields[0])
+					r.hub.protocolRegistry.RegisterVerb(fields[0])
 				}
 				if len(fields) > 1 {
-					protocol.DefaultRegistry.RegisterSubVerb(fields[1])
+					r.hub.protocolRegistry.RegisterSubVerb(fields[1])
 				}
 			}
 		}

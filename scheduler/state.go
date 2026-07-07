@@ -150,8 +150,8 @@ func (m *StateManager) RemoveTask(taskID string, projectPath string) error {
 
 // LoadTasks loads all tasks for a specific project.
 func (m *StateManager) LoadTasks(projectPath string) ([]*Task, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	statePath := m.getStatePath(projectPath)
 	state, err := m.loadStateLocked(statePath)

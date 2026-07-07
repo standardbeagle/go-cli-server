@@ -142,6 +142,23 @@ func TestGetDescendants(t *testing.T) {
 	}
 }
 
+func TestGetVerifiedDescendantsRequiresIdentity(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracker := NewFilePIDTracker(FilePIDTrackerConfig{
+		Path: filepath.Join(tmpDir, "pids.json"),
+	})
+
+	_ = tracker.Add("proc-1", 1000, 1000, "/project")
+	_ = tracker.UpdateDescendants(1000, []int{1001, 1002})
+
+	if got := tracker.GetDescendants(1000); len(got) != 2 {
+		t.Fatalf("GetDescendants() len = %d, want 2", len(got))
+	}
+	if got := tracker.GetVerifiedDescendants(1000); len(got) != 0 {
+		t.Fatalf("GetVerifiedDescendants() = %v, want none for descendants without identity", got)
+	}
+}
+
 func TestListAllPIDs(t *testing.T) {
 	tmpDir := t.TempDir()
 	tracker := NewFilePIDTracker(FilePIDTrackerConfig{

@@ -3,6 +3,7 @@ package client
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -62,5 +63,30 @@ func TestIsGoTestBinary(t *testing.T) {
 				t.Errorf("isGoTestBinary(%q) = %v, want %v", p, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDefaultHubArgsUseHubFlags(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "hub.sock")
+	got := defaultHubArgs(socketPath)
+	want := []string{"--socket", socketPath}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("defaultHubArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestAcquireStartupLockCreatesParentDir(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "missing", "hub.sock.startup.lock")
+	f, err := acquireStartupLock(lockPath)
+	if err != nil {
+		t.Fatalf("acquireStartupLock() error = %v", err)
+	}
+	releaseStartupLock(f, lockPath)
+
+	if _, err := os.Stat(filepath.Dir(lockPath)); err != nil {
+		t.Fatalf("lock parent dir was not created: %v", err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("lock file should be released and removed, stat err = %v", err)
 	}
 }

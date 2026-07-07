@@ -135,7 +135,7 @@ func main() {
     // Configure auto-start
     config := client.DefaultAutoStartConfig("myapp")
     config.HubPath = "/usr/local/bin/myapp-daemon"
-    config.HubArgs = []string{"daemon", "start"}
+    config.HubArgs = []string{"--socket", config.SocketPath}
 
     // This will start the hub if needed
     conn, err := client.EnsureHubRunning(config)
@@ -315,15 +315,19 @@ h := hub.New(config)
 // RUN-JSON with config payload
 ```
 
-## Message Relay
+## Subprocess Routing
 
-Processes can attach to the hub for inter-process messaging:
+Subprocesses can register command patterns with the hub. Built-in hub commands
+such as `PING`, `INFO`, `PROC`, `RUN`, and `SUBPROCESS` are handled by the hub
+first; unhandled commands are routed by exact or prefix pattern.
 
 ```
-ATTACH -- {"id": "worker-1", "labels": {"type": "indexer"}};;
-RELAY SEND worker-2 -- base64message;;
-RELAY BROADCAST -- base64message;;
-DETACH worker-1;;
+SUBPROCESS REGISTER -- LENGTH
+BASE64_JSON_CONFIG;;
+
+SUBPROCESS START worker-1;;
+CUSTOM COMMAND args;;
+SUBPROCESS STOP worker-1;;
 ```
 
 ## Design Principles

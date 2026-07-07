@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/process"
+	"github.com/standardbeagle/go-cli-server/protocol"
 	"github.com/standardbeagle/go-cli-server/socket"
 )
 
@@ -61,7 +62,8 @@ type Hub struct {
 	subRouter *SubprocessRouter
 
 	// Command registry
-	commands *CommandRegistry
+	commands         *CommandRegistry
+	protocolRegistry *protocol.VerbRegistry
 
 	// Client tracking (lock-free)
 	clients     sync.Map // clientID -> *Connection
@@ -98,13 +100,15 @@ func New(config Config) *Hub {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	protocolRegistry := protocol.NewVerbRegistry()
 	h := &Hub{
-		config:    config,
-		sockMgr:   socket.NewManager(sockConfig),
-		commands:  NewCommandRegistry(),
-		ctx:       ctx,
-		cancel:    cancel,
-		startTime: time.Now(),
+		config:           config,
+		sockMgr:          socket.NewManager(sockConfig),
+		protocolRegistry: protocolRegistry,
+		commands:         NewCommandRegistry(protocolRegistry),
+		ctx:              ctx,
+		cancel:           cancel,
+		startTime:        time.Now(),
 	}
 
 	// Create ProcessManager if enabled
@@ -127,7 +131,7 @@ func (h *Hub) registerBuiltinCommands() {
 	if h.pm != nil {
 		_ = h.commands.Register(CommandDefinition{
 			Verb:     "PROC",
-			SubVerbs: []string{"STATUS", "OUTPUT", "STOP", "LIST", "CLEANUP-PORT", "STDIN", "STREAM"},
+			SubVerbs: []string{"STATUS", "OUTPUT", "STOP", "LIST", "CLEANUP-PORT", "STDIN"},
 			Handler:  h.handleProc,
 		})
 

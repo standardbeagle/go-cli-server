@@ -90,7 +90,7 @@ type SubprocessConfig struct {
 }
 
 type SubprocessTransport struct {
-    // Transport type: "unix", "tcp", "grpc", "stdio"
+    // Transport type: "unix", "tcp", "stdio"
     Type string
 
     // Address (socket path, host:port, etc.)
@@ -114,14 +114,14 @@ type Router struct {
     // Prefix matches (e.g., "PROXY" matches "PROXY START")
     prefix map[string]string
 
-    // Built-in handlers (process management, ping, info)
+    // Built-in handlers (process management, ping, info) run before subprocess routes
     builtin map[string]Handler
 }
 
 // Routing priority:
-// 1. Exact match in routing table
-// 2. Prefix match in routing table
-// 3. Built-in handler
+// 1. Built-in handler
+// 2. Exact match in routing table
+// 3. Prefix match in routing table
 // 4. Unknown command error
 ```
 
@@ -308,12 +308,12 @@ Client C: PROXYLOG QUERY dev → sees traffic from all clients
 
 ### SSH Terminals
 
-Terminals can be shared or isolated:
+Terminals can be provided by a registered subprocess:
 
 ```
-Client A: SSH CONNECT server1 → terminal session
-Client B: SSH ATTACH server1 → joins same session (if permitted)
-Client C: SSH CONNECT server1 --new → new isolated session
+Subprocess: SUBPROCESS REGISTER {"id":"ssh","commands":["SSH *"],...}
+Client A: SSH CONNECT server1 → routed to subprocess ssh
+Client B: SSH STATUS server1 → routed to subprocess ssh
 ```
 
 ## Client Types

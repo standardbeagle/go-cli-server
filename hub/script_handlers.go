@@ -247,9 +247,10 @@ func (h *Hub) handleScriptRestart(ctx context.Context, conn *Connection, cmd *pr
 		return conn.WriteNotFound("script", fmt.Sprintf("%s in %s", name, projectPath))
 	}
 
-	// Stop existing process if running
-	if proc, err := h.pm.Get(entry.ProcessID); err == nil && proc.IsRunning() {
-		if stopErr := h.pm.Stop(ctx, entry.ProcessID); stopErr != nil {
+	// Stop existing process if running. Resolve by project path as well as ID so
+	// identical script names in different projects cannot stop each other.
+	if proc, err := h.pm.GetByPath(entry.ProcessID, entry.ProjectPath); err == nil && proc.IsRunning() {
+		if stopErr := h.pm.StopProcess(ctx, proc); stopErr != nil {
 			return conn.WriteInternalErr(fmt.Sprintf("failed to stop process: %v", stopErr))
 		}
 	}
@@ -336,7 +337,7 @@ func (h *Hub) handleScriptStop(ctx context.Context, conn *Connection, cmd *proto
 		return conn.WriteNotFound("script", fmt.Sprintf("%s in %s", name, projectPath))
 	}
 
-	proc, err := h.pm.Get(entry.ProcessID)
+	proc, err := h.pm.GetByPath(entry.ProcessID, entry.ProjectPath)
 	if err != nil || !proc.IsRunning() {
 		entry.SetState(script.StateStopped)
 		resp := map[string]any{
@@ -350,7 +351,7 @@ func (h *Hub) handleScriptStop(ctx context.Context, conn *Connection, cmd *proto
 		return conn.WriteJSON(data)
 	}
 
-	if stopErr := h.pm.Stop(ctx, entry.ProcessID); stopErr != nil {
+	if stopErr := h.pm.StopProcess(ctx, proc); stopErr != nil {
 		return conn.WriteInternalErr(fmt.Sprintf("failed to stop: %v", stopErr))
 	}
 

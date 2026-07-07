@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -36,12 +37,10 @@ func (h *Hub) handleProc(ctx context.Context, conn *Connection, cmd *protocol.Co
 		return h.handleProcCleanupPort(ctx, conn, cmd)
 	case "STDIN":
 		return h.handleProcStdin(conn, cmd)
-	case "STREAM":
-		return h.handleProcStream(conn, cmd)
 	case "":
 		return conn.WriteMissingParam("PROC", "action", "action required")
 	default:
-		return conn.WriteInvalidAction("PROC", cmd.SubVerb, []string{"STATUS", "OUTPUT", "STOP", "LIST", "CLEANUP-PORT", "STDIN", "STREAM"})
+		return conn.WriteInvalidAction("PROC", cmd.SubVerb, []string{"STATUS", "OUTPUT", "STOP", "LIST", "CLEANUP-PORT", "STDIN"})
 	}
 }
 
@@ -52,7 +51,7 @@ func (h *Hub) handleProcStatus(conn *Connection, cmd *protocol.Command) error {
 
 	proc, err := h.pm.Get(cmd.Args[0])
 	if err != nil {
-		return conn.WriteNotFound("process", cmd.Args[0])
+		return writeProcessLookupError(conn, cmd.Args[0], err)
 	}
 
 	status := map[string]any{
@@ -83,7 +82,7 @@ func (h *Hub) handleProcOutput(conn *Connection, cmd *protocol.Command) error {
 
 	proc, err := h.pm.Get(cmd.Args[0])
 	if err != nil {
-		return conn.WriteNotFound("process", cmd.Args[0])
+		return writeProcessLookupError(conn, cmd.Args[0], err)
 	}
 
 	output, truncated := proc.CombinedOutput()
@@ -117,6 +116,9 @@ func (h *Hub) handleProcStop(ctx context.Context, conn *Connection, cmd *protoco
 	}
 
 	if err := h.pm.Stop(ctx, cmd.Args[0]); err != nil {
+		if errors.Is(err, process.ErrProcessNotFound) || errors.Is(err, process.ErrProcessAmbiguous) {
+			return writeProcessLookupError(conn, cmd.Args[0], err)
+		}
 		return conn.WriteErr(protocol.ErrInvalidState, err.Error())
 	}
 
@@ -174,6 +176,9 @@ func (h *Hub) handleProcStdin(conn *Connection, cmd *protocol.Command) error {
 
 	n, err := h.pm.WriteStdin(cmd.Args[0], cmd.Data)
 	if err != nil {
+		if errors.Is(err, process.ErrProcessNotFound) || errors.Is(err, process.ErrProcessAmbiguous) {
+			return writeProcessLookupError(conn, cmd.Args[0], err)
+		}
 		return conn.WriteErr(protocol.ErrInvalidState, err.Error())
 	}
 
@@ -184,9 +189,11 @@ func (h *Hub) handleProcStdin(conn *Connection, cmd *protocol.Command) error {
 	return conn.WriteJSON(data)
 }
 
-func (h *Hub) handleProcStream(conn *Connection, cmd *protocol.Command) error {
-	// TODO: Implement stdout/stderr streaming
-	return conn.WriteInvalidAction("PROC", "STREAM", []string{"STATUS", "OUTPUT", "STOP", "LIST", "CLEANUP-PORT", "STDIN"})
+func writeProcessLookupError(conn *Connection, id string, err error) error {
+	if errors.Is(err, process.ErrProcessAmbiguous) {
+		return conn.WriteErr(protocol.ErrInvalidArgs, fmt.Sprintf("process ID %q is ambiguous; use a project-scoped process ID or disambiguating command", id))
+	}
+	return conn.WriteNotFound("process", id)
 }
 
 // handleRun handles RUN and RUN-JSON commands.

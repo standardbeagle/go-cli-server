@@ -155,7 +155,9 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 	// snapshot is visible — after Wait the /proc chain is gone, so a live walk
 	// here would find nothing.
 	descendants := proc.Descendants()
-	if dt, ok := pm.pidTracker.(DescendantTracker); ok {
+	if dt, ok := pm.pidTracker.(VerifiedDescendantTracker); ok {
+		descendants = append(descendants, dt.GetVerifiedDescendants(proc.PID())...)
+	} else if dt, ok := pm.pidTracker.(DescendantTracker); ok {
 		descendants = append(descendants, dt.GetDescendants(proc.PID())...)
 	}
 
@@ -392,7 +394,7 @@ func (pm *ProcessManager) Restart(ctx context.Context, id string) (*ManagedProce
 		return nil, fmt.Errorf("failed to stop process for restart: %w", err)
 	}
 
-	pm.Remove(id)
+	pm.RemoveByPath(proc.ID, proc.ProjectPath)
 
 	newProc := NewManagedProcess(ProcessConfig{
 		ID:             id,

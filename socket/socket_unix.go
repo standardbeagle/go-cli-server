@@ -384,6 +384,11 @@ func CleanupZombieDaemons(socketPath string, processMatcher func(pid int) bool) 
 		if p, perr := strconv.Atoi(strings.TrimSpace(string(data))); perr == nil {
 			daemonPID = p
 		}
+	} else if processMatcher == nil {
+		// Without a PID file and without a caller-supplied identity predicate,
+		// scanning /proc with a name substring heuristic is not safe enough to
+		// kill anything. Leave stale socket-file cleanup to Manager.cleanupStale.
+		return 0
 	}
 
 	entries, err := os.ReadDir("/proc")
@@ -414,7 +419,7 @@ func CleanupZombieDaemons(socketPath string, processMatcher func(pid int) bool) 
 		if processMatcher != nil {
 			isOurs = processMatcher(pid)
 		} else {
-			isOurs = isDaemonProcess(pid)
+			isOurs = pid == daemonPID && isDaemonProcess(pid)
 		}
 		if !isOurs {
 			continue

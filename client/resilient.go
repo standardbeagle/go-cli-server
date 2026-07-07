@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/standardbeagle/go-cli-server/socket"
 )
 
 var (
@@ -74,6 +76,22 @@ func DefaultResilientConfig(socketName string) ResilientConfig {
 	}
 }
 
+func normalizeResilientConfig(config ResilientConfig) ResilientConfig {
+	if config.AutoStartConfig.SocketPath == "" {
+		config.AutoStartConfig.SocketPath = socket.DefaultSocketPath(socket.DefaultSocketName)
+	}
+	if config.HeartbeatInterval > 0 && config.HeartbeatTimeout <= 0 {
+		config.HeartbeatTimeout = 5 * time.Second
+	}
+	if config.ReconnectBackoffMin <= 0 {
+		config.ReconnectBackoffMin = 100 * time.Millisecond
+	}
+	if config.ReconnectBackoffMax <= 0 {
+		config.ReconnectBackoffMax = 30 * time.Second
+	}
+	return config
+}
+
 // ResilientConn wraps Conn with automatic reconnection and health monitoring.
 type ResilientConn struct {
 	config ResilientConfig
@@ -106,7 +124,7 @@ type ResilientConn struct {
 // NewResilientConn creates a new resilient connection.
 func NewResilientConn(config ResilientConfig) *ResilientConn {
 	return &ResilientConn{
-		config: config,
+		config: normalizeResilientConfig(config),
 	}
 }
 
@@ -366,6 +384,7 @@ func (rc *ResilientConn) reconnectLoop() {
 	defer rc.reconnecting.Store(false)
 
 	backoff := rc.config.ReconnectBackoffMin
+	maxBackoff := rc.config.ReconnectBackoffMax
 	attempts := 0
 
 	for {
@@ -433,7 +452,7 @@ func (rc *ResilientConn) reconnectLoop() {
 
 		// Exponential backoff
 		time.Sleep(backoff)
-		backoff = minDuration(backoff*2, rc.config.ReconnectBackoffMax)
+		backoff = minDuration(backoff*2, maxBackoff)
 	}
 }
 

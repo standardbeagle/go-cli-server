@@ -47,6 +47,10 @@ type DescendantTracker interface {
 	UpdateDescendants(pid int, descendants []int) error
 }
 
+type VerifiedDescendantTracker interface {
+	GetVerifiedDescendants(pid int) []int
+}
+
 // ManagerConfig holds configuration for the ProcessManager.
 type ManagerConfig struct {
 	DefaultTimeout    time.Duration

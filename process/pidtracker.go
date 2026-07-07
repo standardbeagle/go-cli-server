@@ -25,7 +25,10 @@ type TrackedProcess struct {
 	Identity       string    `json:"identity,omitempty"`
 	StartedAt      time.Time `json:"started_at"`
 	DescendantPIDs []int     `json:"descendants,omitempty"`
-	LastScanAt     time.Time `json:"last_scan_at,omitempty"`
+	// DescendantIdentities stores OS identity tokens for descendant PIDs captured
+	// during the same scan. Kill paths use it to avoid killing a recycled PID.
+	DescendantIdentities map[int]string `json:"descendant_identities,omitempty"`
+	LastScanAt           time.Time      `json:"last_scan_at,omitempty"`
 }
 
 // PIDTracking holds the complete tracking state.
@@ -232,6 +235,17 @@ func identityMatches(proc TrackedProcess) bool {
 	return processIdentity(proc.PID) == proc.Identity
 }
 
+func descendantIdentityMatches(proc TrackedProcess, pid int) bool {
+	if proc.DescendantIdentities == nil {
+		return false
+	}
+	identity := proc.DescendantIdentities[pid]
+	if identity == "" {
+		return false
+	}
+	return processIdentity(pid) == identity
+}
+
 // CleanupOrphans checks for orphaned processes from a previous daemon crash
 // and kills them. This should be called on daemon startup.
 func (pt *FilePIDTracker) CleanupOrphans(currentDaemonPID int) (killedCount int, err error) {
@@ -265,7 +279,7 @@ func (pt *FilePIDTracker) CleanupOrphans(currentDaemonPID int) (killedCount int,
 		// so pass 0 as pgid — killOrphanProcess only signals the group when
 		// pid == pgid.
 		for _, dpid := range proc.DescendantPIDs {
-			if isProcessAlive(dpid) {
+			if isProcessAlive(dpid) && descendantIdentityMatches(proc, dpid) {
 				killOrphanProcess(dpid, 0)
 				killedCount++
 			}
@@ -303,11 +317,28 @@ func (pt *FilePIDTracker) UpdateDescendants(pid int, descendants []int) error {
 	for i := range tracking.Processes {
 		if tracking.Processes[i].PID == pid {
 			tracking.Processes[i].DescendantPIDs = descendants
+			tracking.Processes[i].DescendantIdentities = descendantIdentities(descendants)
 			tracking.Processes[i].LastScanAt = now
 			return pt.saveLocked(tracking)
 		}
 	}
 	return nil
+}
+
+func descendantIdentities(descendants []int) map[int]string {
+	if len(descendants) == 0 {
+		return nil
+	}
+	identities := make(map[int]string, len(descendants))
+	for _, pid := range descendants {
+		if identity := processIdentity(pid); identity != "" {
+			identities[pid] = identity
+		}
+	}
+	if len(identities) == 0 {
+		return nil
+	}
+	return identities
 }
 
 // ListAllPIDs returns a flat list of all tracked PIDs and their descendants.
@@ -344,6 +375,28 @@ func (pt *FilePIDTracker) GetDescendants(pid int) []int {
 		if proc.PID == pid {
 			return proc.DescendantPIDs
 		}
+	}
+	return nil
+}
+
+// GetVerifiedDescendants returns stored descendant PIDs whose current process
+// identity still matches the identity captured during the last scan.
+func (pt *FilePIDTracker) GetVerifiedDescendants(pid int) []int {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	tracking := pt.loadLocked()
+	for _, proc := range tracking.Processes {
+		if proc.PID != pid {
+			continue
+		}
+		var result []int
+		for _, dpid := range proc.DescendantPIDs {
+			if descendantIdentityMatches(proc, dpid) {
+				result = append(result, dpid)
+			}
+		}
+		return result
 	}
 	return nil
 }
@@ -390,6 +443,7 @@ func (pt *FilePIDTracker) scanDescendants() {
 		}
 		descendants := scanDescendantPIDs(pid)
 		tracking.Processes[i].DescendantPIDs = descendants
+		tracking.Processes[i].DescendantIdentities = descendantIdentities(descendants)
 		tracking.Processes[i].LastScanAt = now
 		changed = true
 	}

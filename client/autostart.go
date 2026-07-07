@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,7 +23,7 @@ type AutoStartConfig struct {
 	// If empty, will look for a "-daemon" variant of the current executable.
 	HubPath string
 	// HubArgs are the arguments to pass to the hub executable.
-	// Defaults to ["daemon", "start", "--socket", socketPath].
+	// Defaults to ["--socket", socketPath].
 	HubArgs []string
 	// StartTimeout is how long to wait for the hub to start.
 	StartTimeout time.Duration
@@ -145,7 +146,7 @@ func (c *AutoStartConn) startHub() error {
 	// Build command arguments
 	args := c.config.HubArgs
 	if len(args) == 0 {
-		args = []string{"daemon", "start", "--socket", c.config.SocketPath}
+		args = defaultHubArgs(c.config.SocketPath)
 	}
 
 	cmd := exec.Command(execPath, args...)
@@ -168,6 +169,10 @@ func (c *AutoStartConn) startHub() error {
 	return nil
 }
 
+func defaultHubArgs(socketPath string) []string {
+	return []string{"--socket", socketPath}
+}
+
 // isGoTestBinary returns true if the given executable path looks like a Go
 // test binary. Go test binaries end in ".test" (or ".test.exe" on Windows) or
 // live under a go-build temp directory. Detecting these prevents the
@@ -187,6 +192,9 @@ func isGoTestBinary(path string) bool {
 // acquireStartupLock attempts to acquire an exclusive lock for hub startup.
 // Returns the lock file handle on success, or error if lock is held by another process.
 func acquireStartupLock(lockPath string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return nil, err
+	}
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err

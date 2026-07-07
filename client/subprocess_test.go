@@ -3,7 +3,9 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -11,6 +13,12 @@ import (
 
 	"github.com/standardbeagle/go-cli-server/protocol"
 )
+
+var errTestWrite = errors.New("write failed")
+
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) { return 0, errTestWrite }
 
 func TestSubprocessServer_StartStop(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -40,6 +48,50 @@ func TestSubprocessServer_StartStop(t *testing.T) {
 
 	if err := server.Stop(ctx); err != nil {
 		t.Errorf("Stop failed: %v", err)
+	}
+}
+
+func TestSubprocessServer_WaitBeforeStartReturns(t *testing.T) {
+	server := NewSubprocessServer(SubprocessServerConfig{
+		ID:        "test",
+		Transport: TransportConfig{Type: "tcp", Address: "127.0.0.1:0"},
+	})
+
+	done := make(chan struct{})
+	go func() {
+		server.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Wait before Start blocked")
+	}
+}
+
+func TestSubprocessServer_StartDoesNotRemoveNonSocketPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-a-socket")
+	if err := os.WriteFile(path, []byte("keep me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewSubprocessServer(SubprocessServerConfig{
+		ID:        "test",
+		Transport: TransportConfig{Type: "unix", Address: path},
+	})
+
+	if err := server.Start(); err == nil {
+		_ = server.Stop(context.Background())
+		t.Fatal("Start succeeded with non-socket path")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("regular file was removed: %v", err)
+	}
+	if string(data) != "keep me" {
+		t.Fatalf("regular file contents changed: %q", string(data))
 	}
 }
 
@@ -364,6 +416,14 @@ func TestResponseHelpers(t *testing.T) {
 			t.Errorf("Data length = %d, want 4", len(resp.Data))
 		}
 	})
+}
+
+func TestWriteStdioResponseReturnsWriteError(t *testing.T) {
+	writer := protocol.NewWriter(errWriter{})
+	err := writeStdioResponse(writer, OKResponse("ok"))
+	if !errors.Is(err, errTestWrite) {
+		t.Fatalf("writeStdioResponse error = %v, want %v", err, errTestWrite)
+	}
 }
 
 func TestRegisterHandlers(t *testing.T) {

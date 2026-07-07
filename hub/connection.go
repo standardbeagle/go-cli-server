@@ -32,7 +32,7 @@ func newConnection(id int64, conn net.Conn, hub *Hub) *Connection {
 		id:     id,
 		conn:   conn,
 		hub:    hub,
-		parser: protocol.NewParser(conn),
+		parser: protocol.NewParserWithRegistry(conn, hub.protocolRegistry),
 		writer: protocol.NewWriter(conn),
 	}
 }
@@ -77,12 +77,16 @@ func (c *Connection) Handle(ctx context.Context) {
 			// already consumed the whole offending frame up to its ";;", so the
 			// stream is still aligned. Report and keep reading — do NOT Resync,
 			// which would swallow the client's next legitimate command.
-			_ = c.WriteErr(protocol.ErrInvalidCommand, err.Error())
+			if err := c.WriteErr(protocol.ErrInvalidCommand, err.Error()); err != nil {
+				return
+			}
 			continue
 		}
 
 		// Dispatch command
-		_ = c.handleCommand(ctx, cmd) // Error was already sent to client
+		if err := c.handleCommand(ctx, cmd); err != nil {
+			return
+		}
 	}
 }
 

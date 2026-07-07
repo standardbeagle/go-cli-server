@@ -38,6 +38,35 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestHubCustomCommandDoesNotMutateDefaultProtocolRegistry(t *testing.T) {
+	const verb = "LOCALONLY"
+
+	if protocol.DefaultRegistry.IsValidVerb(verb) {
+		t.Fatalf("%s unexpectedly present in default registry before test", verb)
+	}
+
+	cfg := DefaultConfig()
+	cfg.EnableProcessMgmt = false
+	h := New(cfg)
+
+	err := h.RegisterCommand(CommandDefinition{
+		Verb: verb,
+		Handler: func(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
+			return conn.WriteOK("ok")
+		},
+	})
+	if err != nil {
+		t.Fatalf("RegisterCommand error: %v", err)
+	}
+
+	if !h.protocolRegistry.IsValidVerb(verb) {
+		t.Fatalf("%s not registered in hub-local registry", verb)
+	}
+	if protocol.DefaultRegistry.IsValidVerb(verb) {
+		t.Fatalf("%s leaked into default protocol registry", verb)
+	}
+}
+
 // TestNew verifies hub creation.
 func TestNew(t *testing.T) {
 	cfg := DefaultConfig()
@@ -759,8 +788,15 @@ func TestProcStopNotFound(t *testing.T) {
 		t.Fatalf("ParseResponse error = %v", err)
 	}
 
-	if resp.Type != protocol.ResponseErr {
-		t.Errorf("Response type = %v, want ERR", resp.Type)
+	if resp.Type != protocol.ResponseJSON {
+		t.Errorf("Response type = %v, want JSON", resp.Type)
+	}
+	var se protocol.StructuredError
+	if err := json.Unmarshal(resp.Data, &se); err != nil {
+		t.Fatalf("Unmarshal error = %v", err)
+	}
+	if se.Code != protocol.ErrNotFound {
+		t.Errorf("Error code = %v, want %v", se.Code, protocol.ErrNotFound)
 	}
 }
 

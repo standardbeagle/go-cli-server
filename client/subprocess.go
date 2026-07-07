@@ -91,11 +91,13 @@ type CommandHandler func(ctx context.Context, cmd *protocol.Command) *protocol.R
 
 // NewSubprocessServer creates a new subprocess server.
 func NewSubprocessServer(config SubprocessServerConfig) *SubprocessServer {
+	shutdown := make(chan struct{})
+	close(shutdown)
 	return &SubprocessServer{
 		config:       config,
 		handlers:     make(map[string]CommandHandler),
 		verbRegistry: protocol.NewVerbRegistry(),
-		shutdown:     make(chan struct{}),
+		shutdown:     shutdown,
 		wg:           &sync.WaitGroup{},
 	}
 }
@@ -144,8 +146,10 @@ func (s *SubprocessServer) Start() error {
 	var err error
 	switch s.config.Transport.Type {
 	case "unix":
-		// Remove stale socket file
-		os.Remove(s.config.Transport.Address)
+		if err := removeStaleUnixSocket(s.config.Transport.Address); err != nil {
+			s.running.Store(false)
+			return err
+		}
 		listener, err = net.Listen("unix", s.config.Transport.Address)
 	case "tcp":
 		listener, err = net.Listen("tcp", s.config.Transport.Address)
@@ -166,6 +170,23 @@ func (s *SubprocessServer) Start() error {
 	// could reassign.
 	go s.acceptLoop(listener, epochWG)
 
+	return nil
+}
+
+func removeStaleUnixSocket(path string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to stat unix socket path: %w", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("unix socket path exists and is not a socket: %s", path)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("failed to remove stale unix socket: %w", err)
+	}
 	return nil
 }
 
@@ -216,8 +237,12 @@ func (s *SubprocessServer) Stop(ctx context.Context) error {
 
 // Wait blocks until the server is stopped.
 func (s *SubprocessServer) Wait() {
-	<-s.currentShutdown()
-	s.currentWG().Wait()
+	s.shutMu.Lock()
+	shutdown := s.shutdown
+	wg := s.wg
+	s.shutMu.Unlock()
+	<-shutdown
+	wg.Wait()
 }
 
 // Address returns the actual address the server is listening on.
@@ -232,6 +257,7 @@ func (s *SubprocessServer) Address() string {
 // started with (its epoch's resources).
 func (s *SubprocessServer) acceptLoop(listener net.Listener, wg *sync.WaitGroup) {
 	defer wg.Done()
+	backoff := 10 * time.Millisecond
 
 	for {
 		conn, err := listener.Accept()
@@ -242,9 +268,16 @@ func (s *SubprocessServer) acceptLoop(listener net.Listener, wg *sync.WaitGroup)
 			if errors.Is(err, net.ErrClosed) || !s.running.Load() {
 				return
 			}
-			// Transient error; keep accepting.
-			continue
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				time.Sleep(backoff)
+				if backoff < time.Second {
+					backoff *= 2
+				}
+				continue
+			}
+			return
 		}
+		backoff = 10 * time.Millisecond
 
 		// Handle connection
 		sc := &subprocessConn{
@@ -308,11 +341,16 @@ func (c *subprocessConn) handleConnection() {
 			}
 			// Check for unknown command - respond with error but keep connection
 			if unknownErr, ok := err.(*protocol.ErrUnknownCommand); ok {
-				_ = c.writeResponse(&protocol.Response{
+				if err := c.writeResponse(&protocol.Response{
 					Type:    protocol.ResponseErr,
 					Code:    string(protocol.ErrInvalidCommand),
 					Message: fmt.Sprintf("unknown command: %s", unknownErr.Verb),
-				})
+				}); err != nil {
+					if c.server.config.OnDisconnect != nil {
+						c.server.config.OnDisconnect(err)
+					}
+					return
+				}
 				continue
 			}
 			// Connection error
@@ -325,7 +363,12 @@ func (c *subprocessConn) handleConnection() {
 		// Handle the command
 		resp := c.handleCommand(cmd)
 		if resp != nil {
-			_ = c.writeResponse(resp)
+			if err := c.writeResponse(resp); err != nil {
+				if c.server.config.OnDisconnect != nil {
+					c.server.config.OnDisconnect(err)
+				}
+				return
+			}
 		}
 	}
 }
@@ -472,7 +515,9 @@ func (s *SubprocessStdioServer) Run() error {
 
 		resp := s.handleCommand(cmd)
 		if resp != nil {
-			writeStdioResponse(writer, resp)
+			if err := writeStdioResponse(writer, resp); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -501,19 +546,24 @@ func (s *SubprocessStdioServer) handleCommand(cmd *protocol.Command) *protocol.R
 	return handler(ctx, cmd)
 }
 
-func writeStdioResponse(writer *protocol.Writer, resp *protocol.Response) {
+func writeStdioResponse(writer *protocol.Writer, resp *protocol.Response) error {
 	switch resp.Type {
 	case protocol.ResponseOK:
-		_ = writer.WriteOK(resp.Message)
+		return writer.WriteOK(resp.Message)
 	case protocol.ResponseErr:
-		_ = writer.WriteErr(protocol.ErrorCode(resp.Code), resp.Message)
+		return writer.WriteErr(protocol.ErrorCode(resp.Code), resp.Message)
 	case protocol.ResponsePong:
-		_ = writer.WritePong()
+		return writer.WritePong()
 	case protocol.ResponseJSON:
-		_ = writer.WriteJSON(resp.Data)
+		return writer.WriteJSON(resp.Data)
 	case protocol.ResponseData:
-		_ = writer.WriteData(resp.Data)
+		return writer.WriteData(resp.Data)
+	case protocol.ResponseChunk:
+		return writer.WriteChunk(resp.Data)
+	case protocol.ResponseEnd:
+		return writer.WriteEnd()
 	}
+	return fmt.Errorf("unsupported response type: %s", resp.Type)
 }
 
 // RegisterWithHub connects to a hub and registers this process as a subprocess.

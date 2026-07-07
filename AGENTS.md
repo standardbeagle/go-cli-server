@@ -32,15 +32,15 @@ golangci-lint run ./...
 - **hub/** - 總樞；subprocess registry、command router
 - **client/** - Client library；request builder、auto-start、resilient connection
 - **process/** - Process lifecycle；state machine、PID tracking、ring buffers for output
-- **socket/** - Unix domain socket (or named pipes on Windows)
+- **socket/** - AF_UNIX socket management on Unix and Windows
 - **scheduler/** - Task scheduling with persistence
 
 ### Command Routing
 
 三等優先：
-1. Exact match: `"PROXY START"` → subprocess ID
-2. Prefix match: `"PROXY"` → subprocess ID
-3. Built-in handlers: PING, INFO, PROC, RUN, SUBPROCESS
+1. Built-in handlers: PING, INFO, PROC, RUN, SUBPROCESS
+2. Exact match: `"PROXY START"` → subprocess ID
+3. Prefix match: `"PROXY"` → subprocess ID
 
 ### Lock-Free Design
 
@@ -115,7 +115,7 @@ PONG;;
 ## Platform Support
 
 - Unix: `socket/socket_unix.go`, `process/lifecycle_unix.go`
-- Windows: `socket/socket_windows.go`, `process/lifecycle_windows.go`
+- Windows: `socket/socket_windows.go`, `process/lifecycle_windows.go` (AF_UNIX sockets)
 - Build tags: `//go:build unix`, `//go:build windows`
 
 ## Testing Notes

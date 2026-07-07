@@ -34,11 +34,16 @@ type verbHandler struct {
 // CommandRegistry manages command handlers with lock-free access.
 type CommandRegistry struct {
 	handlers sync.Map // verb -> *verbHandler
+	protocol *protocol.VerbRegistry
 }
 
 // NewCommandRegistry creates a new command registry.
-func NewCommandRegistry() *CommandRegistry {
-	return &CommandRegistry{}
+func NewCommandRegistry(registry ...*protocol.VerbRegistry) *CommandRegistry {
+	reg := protocol.NewVerbRegistry()
+	if len(registry) > 0 && registry[0] != nil {
+		reg = registry[0]
+	}
+	return &CommandRegistry{protocol: reg}
 }
 
 // Register adds a command handler to the registry.
@@ -64,10 +69,10 @@ func (r *CommandRegistry) Register(def CommandDefinition) error {
 
 	r.handlers.Store(verb, vh)
 
-	// Register verb with the protocol parser
-	protocol.DefaultRegistry.RegisterVerb(verb)
+	// Register verb with this hub's protocol parser.
+	r.protocol.RegisterVerb(verb)
 	for _, sv := range def.SubVerbs {
-		protocol.DefaultRegistry.RegisterSubVerb(sv)
+		r.protocol.RegisterSubVerb(sv)
 	}
 
 	return nil
@@ -87,7 +92,7 @@ func (r *CommandRegistry) RegisterSubHandler(verb, subVerb string, handler Comma
 	vh.subHandlers.Store(subVerb, handler)
 	vh.validSubs = append(vh.validSubs, subVerb)
 
-	protocol.DefaultRegistry.RegisterSubVerb(subVerb)
+	r.protocol.RegisterSubVerb(subVerb)
 
 	return nil
 }

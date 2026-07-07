@@ -188,6 +188,26 @@ func TestGet(t *testing.T) {
 	}
 }
 
+func TestGetAmbiguousID(t *testing.T) {
+	pm := NewProcessManager(ManagerConfig{HealthCheckPeriod: 0})
+
+	_ = pm.Register(NewManagedProcess(ProcessConfig{
+		ID:          "same-id",
+		ProjectPath: "/project/a",
+		Command:     "echo",
+	}))
+	_ = pm.Register(NewManagedProcess(ProcessConfig{
+		ID:          "same-id",
+		ProjectPath: "/project/b",
+		Command:     "echo",
+	}))
+
+	_, err := pm.Get("same-id")
+	if !errors.Is(err, ErrProcessAmbiguous) {
+		t.Fatalf("Get ambiguous error = %v, want ErrProcessAmbiguous", err)
+	}
+}
+
 // TestGetByPath verifies process retrieval by ID and path.
 func TestGetByPath(t *testing.T) {
 	pm := NewProcessManager(ManagerConfig{HealthCheckPeriod: 0})
