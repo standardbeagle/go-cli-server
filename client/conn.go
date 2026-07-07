@@ -42,6 +42,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/standardbeagle/go-cli-server/protocol"
@@ -69,6 +70,22 @@ type Conn struct {
 	parser *protocol.Parser
 	writer *protocol.Writer
 	closed bool
+
+	// active holds the current net.Conn for out-of-band interruption.
+	// Close/Disconnect use it to abort a blocked read without waiting on mu,
+	// which prevents a hung hub from freezing every caller behind mu.
+	active atomic.Pointer[activeConn]
+}
+
+// activeConn wraps a net.Conn so it can be stored in an atomic.Pointer.
+type activeConn struct{ c net.Conn }
+
+// setDeadlineLocked applies the configured timeout as an I/O deadline.
+// Caller must hold mu and have a live conn.
+func (c *Conn) setDeadlineLocked() {
+	if c.timeout > 0 && c.conn != nil {
+		_ = c.conn.SetDeadline(time.Now().Add(c.timeout))
+	}
 }
 
 // Option configures a Conn.
@@ -140,6 +157,7 @@ func (c *Conn) ensureConnectedLocked() error {
 	c.conn = conn
 	c.parser = protocol.NewParser(conn)
 	c.writer = protocol.NewWriter(conn)
+	c.active.Store(&activeConn{c: conn})
 	return nil
 }
 
@@ -153,6 +171,9 @@ func (c *Conn) IsConnected() bool {
 // Close closes the connection permanently.
 // After Close, the Conn cannot be reused.
 func (c *Conn) Close() error {
+	// Abort any blocked read first so a caller stuck on a hung hub releases mu.
+	c.interruptActive()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -161,6 +182,7 @@ func (c *Conn) Close() error {
 	}
 
 	c.closed = true
+	c.active.Store(nil)
 	if c.conn != nil {
 		err := c.conn.Close()
 		c.conn = nil
@@ -174,6 +196,8 @@ func (c *Conn) Close() error {
 // Disconnect closes the current connection but allows reconnection.
 // Use this to release resources temporarily while keeping the Conn usable.
 func (c *Conn) Disconnect() error {
+	c.interruptActive()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -181,11 +205,21 @@ func (c *Conn) Disconnect() error {
 		return nil
 	}
 
+	c.active.Store(nil)
 	err := c.conn.Close()
 	c.conn = nil
 	c.parser = nil
 	c.writer = nil
 	return err
+}
+
+// interruptActive aborts an in-flight blocked read on the current connection
+// without acquiring mu, so Close/Disconnect can break a caller stuck reading
+// from a hung hub instead of deadlocking behind mu.
+func (c *Conn) interruptActive() {
+	if a := c.active.Load(); a != nil {
+		_ = a.c.SetDeadline(time.Now())
+	}
 }
 
 // Request creates a new request builder for the given verb and arguments.
@@ -214,6 +248,7 @@ func (c *Conn) Ping() error {
 		return err
 	}
 
+	c.setDeadlineLocked()
 	if err := c.writer.WriteCommand(protocol.VerbPing, nil, nil); err != nil {
 		c.handleErrorLocked()
 		return fmt.Errorf("failed to send ping: %w", err)
@@ -236,6 +271,7 @@ func (c *Conn) Ping() error {
 // Caller must hold mu.
 func (c *Conn) handleErrorLocked() {
 	if c.conn != nil {
+		c.active.Store(nil)
 		c.conn.Close()
 		c.conn = nil
 		c.parser = nil
@@ -252,6 +288,7 @@ func (c *Conn) execute(verb string, args []string, data []byte) (*protocol.Respo
 		return nil, err
 	}
 
+	c.setDeadlineLocked()
 	if err := c.writer.WriteCommandWithSubVerb(verb, "", args, data); err != nil {
 		c.handleErrorLocked()
 		return nil, fmt.Errorf("failed to send command: %w", err)
@@ -275,6 +312,7 @@ func (c *Conn) executeChunked(verb string, args []string, data []byte) ([]byte, 
 		return nil, err
 	}
 
+	c.setDeadlineLocked()
 	if err := c.writer.WriteCommandWithSubVerb(verb, "", args, data); err != nil {
 		c.handleErrorLocked()
 		return nil, fmt.Errorf("failed to send command: %w", err)
@@ -282,6 +320,9 @@ func (c *Conn) executeChunked(verb string, args []string, data []byte) ([]byte, 
 
 	var result []byte
 	for {
+		// Refresh the deadline per chunk so a large streamed response is bounded
+		// by idle time between chunks rather than total transfer time.
+		c.setDeadlineLocked()
 		resp, err := c.parser.ParseResponse()
 		if err != nil {
 			if err == io.EOF {

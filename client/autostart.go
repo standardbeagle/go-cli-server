@@ -61,6 +61,12 @@ func NewAutoStartConn(config AutoStartConfig) *AutoStartConn {
 
 // Connect connects to the hub, starting it if necessary.
 func (c *AutoStartConn) Connect() error {
+	// Reject an empty socket path outright: it would derive a relative
+	// ".startup.lock" in the working directory and connect nowhere useful.
+	if c.config.SocketPath == "" {
+		return fmt.Errorf("auto-start requires a non-empty SocketPath")
+	}
+
 	// First, try to connect directly
 	err := c.Conn.EnsureConnected()
 	if err == nil {
@@ -209,10 +215,18 @@ func releaseStartupLock(f *os.File, lockPath string) {
 
 // waitForHub waits for the hub to be ready to accept connections.
 func (c *AutoStartConn) waitForHub() error {
-	ctx, cancel := context.WithTimeout(context.Background(), c.config.StartTimeout)
+	startTimeout := c.config.StartTimeout
+	if startTimeout <= 0 {
+		startTimeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
 	defer cancel()
 
-	ticker := time.NewTicker(c.config.RetryInterval)
+	retryInterval := c.config.RetryInterval
+	if retryInterval <= 0 {
+		retryInterval = 50 * time.Millisecond
+	}
+	ticker := time.NewTicker(retryInterval)
 	defer ticker.Stop()
 
 	retries := 0
@@ -229,7 +243,8 @@ func (c *AutoStartConn) waitForHub() error {
 				return err
 			}
 			retries++
-			if retries >= c.config.MaxRetries {
+			// MaxRetries <= 0 means rely solely on the context timeout.
+			if c.config.MaxRetries > 0 && retries >= c.config.MaxRetries {
 				return fmt.Errorf("max retries exceeded waiting for hub")
 			}
 		}

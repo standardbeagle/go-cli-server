@@ -80,6 +80,7 @@ type ResilientConn struct {
 	shutdown     atomic.Bool
 
 	// Heartbeat management
+	hbMu            sync.Mutex
 	heartbeatCancel func()
 
 	// Statistics
@@ -136,8 +137,11 @@ func (rc *ResilientConn) Close() error {
 	}
 
 	// Stop heartbeat
-	if rc.heartbeatCancel != nil {
-		rc.heartbeatCancel()
+	rc.hbMu.Lock()
+	cancel := rc.heartbeatCancel
+	rc.hbMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 
 	// Close underlying connection
@@ -220,14 +224,16 @@ func (rc *ResilientConn) startHeartbeat() {
 		return
 	}
 
-	// Cancel any existing heartbeat
+	done := make(chan struct{})
+	var once sync.Once
+
+	rc.hbMu.Lock()
+	// Cancel any existing heartbeat before replacing it.
 	if rc.heartbeatCancel != nil {
 		rc.heartbeatCancel()
 	}
-
-	done := make(chan struct{})
-	var once sync.Once
 	rc.heartbeatCancel = func() { once.Do(func() { close(done) }) }
+	rc.hbMu.Unlock()
 
 	go rc.heartbeatLoop(done)
 }
