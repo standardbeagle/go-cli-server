@@ -317,6 +317,11 @@ func (r *SubprocessRouter) Unregister(id string) error {
 	}
 
 	sp := val.(*ManagedSubprocess)
+	// Mark stopped BEFORE cancelling so an in-flight doRestart (which is detached
+	// and not tracked by sp.wg, so the Wait below does not cover it) aborts in its
+	// stopped re-check instead of resurrecting an unregistered subprocess with a
+	// leaked health loop and fd.
+	sp.stopped.Store(true)
 	sp.cancelLifecycle() // Signal shutdown
 
 	// Wait for graceful stop
@@ -644,8 +649,19 @@ func (r *SubprocessRouter) GetRoutes() map[string]string {
 	return routes
 }
 
-// start starts the subprocess.
+// start starts the subprocess. This is the user-initiated entry point: it clears
+// any prior stop marker (the user is explicitly (re)starting, re-arming
+// auto-restart) and then runs the shared startCore.
 func (sp *ManagedSubprocess) start(ctx context.Context) error {
+	sp.stopped.Store(false)
+	return sp.startCore(ctx)
+}
+
+// startCore performs the actual connect + health-loop setup. It is shared by the
+// user path (start) and the auto-restart path (doRestart). It does NOT clear the
+// stop marker, and it re-checks it after winning the CAS so a stop()/Unregister
+// that raced an in-flight restart cannot be overridden into a live subprocess.
+func (sp *ManagedSubprocess) startCore(ctx context.Context) error {
 	// CAS into Starting so two concurrent start() calls cannot both proceed
 	// (which would double-connect, leak fds, and run dual health loops). The
 	// load-then-store pattern this replaces violated the CAS mandate.
@@ -664,8 +680,15 @@ func (sp *ManagedSubprocess) start(ctx context.Context) error {
 		}
 	}
 
-	// A fresh start clears any prior user-stop marker so auto-restart is armed again.
-	sp.stopped.Store(false)
+	// Honor a stop()/Unregister that set the marker after the caller's last check
+	// (the doRestart resurrection window). The user path cleared it in start(), so
+	// this only fires for a genuine concurrent stop.
+	if sp.stopped.Load() {
+		sp.state.Store(SubprocessStopped)
+		now := time.Now()
+		sp.stateChanged.Store(&now)
+		return fmt.Errorf("start aborted: subprocess stopped")
+	}
 
 	// Establish a fresh lifecycle context. A prior stop() or restart cancels the
 	// old one; without recreating it here a stopped subprocess could never be
@@ -874,10 +897,13 @@ func (sp *ManagedSubprocess) stop(ctx context.Context) error {
 
 	sp.cancelLifecycle()
 
-	// Close connection if exists
+	// Close connection if exists. Use Close() (which locks the conn's own mu), not
+	// the raw closer: SendCommand may concurrently nil closer under that mu on a
+	// read error, so calling sp.conn.closer() directly here races that write and
+	// can invoke a nil func.
 	sp.connMu.Lock()
 	if sp.conn != nil {
-		_ = sp.conn.closer()
+		_ = sp.conn.Close()
 		sp.conn = nil
 	}
 	sp.connMu.Unlock()
@@ -1062,17 +1088,31 @@ func (sp *ManagedSubprocess) doRestart() {
 		sp.consecutiveFails.Store(0)
 		sp.healthy.Store(false)
 
-		// Reset state so start() proceeds — it refuses to start from Running/Starting.
+		// Re-check after the drain: a stop()/Unregister could have landed during
+		// wg.Wait(). Bail before touching state so we don't resurrect it.
+		if sp.stopped.Load() {
+			return
+		}
+
+		// Reset state so startCore proceeds — it refuses to start from Running/Starting.
 		sp.state.Store(SubprocessStopped)
 		now := time.Now()
 		sp.stateChanged.Store(&now)
 
 		// Background-derived timeout; the just-cancelled lifecycle ctx must not be used.
+		// Use startCore (not start) so the stop marker is NOT cleared and startCore's
+		// post-CAS stopped re-check still aborts a resurrection that raced this far.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := sp.start(ctx)
+		err := sp.startCore(ctx)
 		cancel()
 		if err == nil {
 			return // healthy again; a fresh health loop is running
+		}
+
+		// startCore aborted because a stop()/Unregister landed: don't stamp Failed
+		// over the stopping subprocess, just exit.
+		if sp.stopped.Load() {
+			return
 		}
 
 		sp.state.Store(SubprocessFailed)

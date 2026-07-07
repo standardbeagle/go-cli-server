@@ -304,8 +304,14 @@ func (pm *ProcessManager) StopProcess(ctx context.Context, proc *ManagedProcess)
 	// exec.CommandContext's cancel path escalates immediately, which previously
 	// SIGKILLed the root before SIGTERM could ever be honored, making
 	// GracefulTimeout an illusion. Cancellation is deferred to forceKill.
+	//
+	// If the graceful signal cannot be delivered (Windows with no console attached,
+	// where CTRL_BREAK fails; or a group that is already gone), escalate now instead
+	// of idling the full GracefulTimeout waiting for a signal the process never got.
 	if proc.cmd != nil && proc.cmd.Process != nil {
-		_ = pm.signalProcessGroup(proc.cmd.Process.Pid, syscall.SIGTERM)
+		if gerr := pm.signalProcessGroup(proc.cmd.Process.Pid, syscall.SIGTERM); gerr != nil {
+			return pm.forceKill(proc)
+		}
 	}
 
 	gracefulTimeout := pm.config.GracefulTimeout

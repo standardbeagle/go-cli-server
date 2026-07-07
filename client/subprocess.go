@@ -34,9 +34,20 @@ type SubprocessServer struct {
 	connections sync.Map // conn -> *subprocessConn
 
 	// State
-	running  atomic.Bool
+	running atomic.Bool
+	// shutdown is recreated on each Start and closed on Stop. shutMu guards the
+	// field itself so a restart's reassignment does not race readers in Wait() and
+	// handleConnection().
+	shutMu   sync.Mutex
 	shutdown chan struct{}
 	wg       sync.WaitGroup
+}
+
+// currentShutdown returns the active shutdown channel under lock.
+func (s *SubprocessServer) currentShutdown() chan struct{} {
+	s.shutMu.Lock()
+	defer s.shutMu.Unlock()
+	return s.shutdown
 }
 
 // SubprocessServerConfig configures a subprocess server.
@@ -104,7 +115,9 @@ func (s *SubprocessServer) Start() error {
 	// Reinstate a fresh shutdown channel. Stop() closed the previous one; without
 	// recreating it a restarted server's connection handlers would see the closed
 	// channel and exit immediately, so Start() would "succeed" onto a dead server.
+	s.shutMu.Lock()
 	s.shutdown = make(chan struct{})
+	s.shutMu.Unlock()
 
 	var err error
 	switch s.config.Transport.Type {
@@ -132,12 +145,12 @@ func (s *SubprocessServer) Start() error {
 
 // Stop stops the subprocess server gracefully.
 func (s *SubprocessServer) Stop(ctx context.Context) error {
-	// CAS so two concurrent Stops cannot both reach close(s.shutdown), which
+	// CAS so two concurrent Stops cannot both reach close(shutdown), which
 	// panics on the second close.
 	if !s.running.CompareAndSwap(true, false) {
 		return nil
 	}
-	close(s.shutdown)
+	close(s.currentShutdown())
 
 	// Close listener
 	if s.listener != nil {
@@ -169,7 +182,7 @@ func (s *SubprocessServer) Stop(ctx context.Context) error {
 
 // Wait blocks until the server is stopped.
 func (s *SubprocessServer) Wait() {
-	<-s.shutdown
+	<-s.currentShutdown()
 	s.wg.Wait()
 }
 
@@ -227,9 +240,13 @@ func (c *subprocessConn) handleConnection() {
 	defer c.server.wg.Done()
 	defer c.close()
 
+	// Capture the shutdown channel for this server epoch once, under lock, rather
+	// than reading the field each iteration (a restart could reassign it).
+	shutdown := c.server.currentShutdown()
+
 	for {
 		select {
-		case <-c.server.shutdown:
+		case <-shutdown:
 			return
 		default:
 		}
