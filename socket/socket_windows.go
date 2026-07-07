@@ -53,6 +53,10 @@ type Manager struct {
 	listener       net.Listener
 	pidFile        string
 	processMatcher func(pid int) bool
+	// owned is true only after this manager successfully bound the socket. Close
+	// removes files only when owned, so a manager that lost the race does not
+	// delete the live daemon's socket/pid files.
+	owned bool
 }
 
 // NewManager creates a new socket manager.
@@ -68,7 +72,10 @@ func NewManager(config Config) *Manager {
 		config.Mode = 0600
 	}
 
-	pidFile := filepath.Join(os.TempDir(), config.Name+".pid")
+	// Key the PID file on the resolved socket path, not Name. Two hubs with the
+	// same Name but different Paths would otherwise share one PID file and each
+	// could terminate the other as a "zombie".
+	pidFile := config.Path + ".pid"
 
 	return &Manager{
 		config:         config,
@@ -99,6 +106,7 @@ func (sm *Manager) Listen() (net.Listener, error) {
 	}
 
 	sm.listener = listener
+	sm.owned = true
 	return listener, nil
 }
 
@@ -112,6 +120,15 @@ func (sm *Manager) Close() error {
 		}
 		sm.listener = nil
 	}
+
+	// Only unlink files we own (see Manager.owned).
+	if !sm.owned {
+		if len(errs) > 0 {
+			return errors.Join(errs...)
+		}
+		return nil
+	}
+	sm.owned = false
 
 	if err := os.Remove(sm.config.Path); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("remove socket file: %w", err))
@@ -176,8 +193,10 @@ func (sm *Manager) isOurDaemonProcess(pid int) bool {
 	if sm.processMatcher != nil {
 		return sm.processMatcher(pid)
 	}
-	// On Windows without a matcher, assume any running process with our PID file is ours
-	return true
+	// Without a matcher we cannot prove the PID is our daemon — the kernel may have
+	// recycled it into an unrelated process. Do NOT claim it; terminating it would
+	// kill whatever now holds that PID.
+	return false
 }
 
 // cleanupStale removes a stale socket file that no daemon is listening on.
