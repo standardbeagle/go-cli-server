@@ -88,6 +88,15 @@ func TestFrameTooLarge(t *testing.T) {
 	}
 }
 
+func TestValidateFrameSize(t *testing.T) {
+	if err := ValidateFrameSize([]byte("PING;;")); err != nil {
+		t.Fatalf("ValidateFrameSize small frame error = %v", err)
+	}
+	if err := ValidateFrameSize(make([]byte, MaxFrameSize+1)); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("ValidateFrameSize oversized error = %v, want ErrFrameTooLarge", err)
+	}
+}
+
 func TestValidateCommandRejectsUnicodeWhitespaceArg(t *testing.T) {
 	cmd := &Command{Verb: "RUN", Args: []string{"alpha\u00a0beta"}}
 	if err := ValidateCommand(cmd); err == nil {

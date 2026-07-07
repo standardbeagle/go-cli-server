@@ -437,6 +437,13 @@ func validateFrameSize(frame []byte) error {
 	return nil
 }
 
+// ValidateFrameSize reports whether a raw protocol frame is small enough to
+// send. It is intended for callers that deliberately bypass Writer formatting
+// (for example a raw CLI command) but still need the same sender-side guard.
+func ValidateFrameSize(frame []byte) error {
+	return validateFrameSize(frame)
+}
+
 // FormatCommand formats a command for transmission.
 // Format: VERB [SUBVERB] [ARGS...] [-- LENGTH\nBASE64DATA];;
 func FormatCommand(cmd *Command) []byte {

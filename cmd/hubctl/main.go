@@ -17,6 +17,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -213,13 +214,7 @@ func execSubprocess(writer *protocol.Writer, parser *protocol.Parser, args []str
 }
 
 func execRaw(conn net.Conn, parser *protocol.Parser, data string) {
-	// Ensure data ends with terminator
-	if !strings.HasSuffix(data, ";;") {
-		data += ";;"
-	}
-
-	_, err := conn.Write([]byte(data))
-	if err != nil {
+	if err := writeRawFrame(conn, data); err != nil {
 		fmt.Fprintf(os.Stderr, "Error sending data: %v\n", err)
 		os.Exit(1)
 	}
@@ -231,6 +226,25 @@ func execRaw(conn net.Conn, parser *protocol.Parser, data string) {
 	}
 
 	os.Exit(printResponse(resp))
+}
+
+func writeRawFrame(conn net.Conn, data string) error {
+	// Ensure data ends with terminator
+	if !strings.HasSuffix(data, ";;") {
+		data += ";;"
+	}
+	if err := protocol.ValidateFrameSize([]byte(data)); err != nil {
+		return err
+	}
+
+	n, err := conn.Write([]byte(data))
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return errors.New("short write")
+	}
+	return nil
 }
 
 // printResponse prints the response and returns the process exit code: nonzero
