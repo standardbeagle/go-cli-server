@@ -31,6 +31,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/standardbeagle/go-cli-server/client"
 	"github.com/standardbeagle/go-cli-server/protocol"
@@ -115,7 +116,7 @@ func main() {
 	<-sigChan
 	log.Println("Shutting down...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := server.Stop(ctx); err != nil {

@@ -230,11 +230,6 @@ func cleanupProcessGroup(pgid int) {
 	cleanupProcessTree(pgid)
 }
 
-// signalTerm sends SIGTERM to the process.
-func signalTerm(pid int) error {
-	return syscall.Kill(pid, syscall.SIGTERM)
-}
-
 // signalKill sends SIGKILL to the process.
 func signalKill(pid int) error {
 	return syscall.Kill(pid, syscall.SIGKILL)
@@ -243,11 +238,6 @@ func signalKill(pid int) error {
 // isProcessAlive checks if a process is still running.
 func isProcessAlive(pid int) bool {
 	return syscall.Kill(pid, syscall.Signal(0)) == nil
-}
-
-// isNoSuchProcess returns true if the error indicates the process doesn't exist.
-func isNoSuchProcess(err error) bool {
-	return err == syscall.ESRCH
 }
 
 // getProcessGroupID returns the process group ID for a given PID.

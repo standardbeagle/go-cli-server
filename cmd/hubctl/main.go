@@ -21,14 +21,15 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/standardbeagle/go-cli-server/protocol"
+	"github.com/standardbeagle/go-cli-server/socket"
 )
 
 func main() {
 	socketPath := flag.String("socket", "", "Hub socket path")
+	socketName := flag.String("name", "go-cli-server", "Socket name (must match the hub's -name)")
 	flag.Parse()
 
 	args := flag.Args()
@@ -37,22 +38,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Determine socket path
+	// Determine socket path. When not given explicitly, derive the same default
+	// the hub uses (socket.DefaultSocketPath) so hubctl and the hub agree on the
+	// path — $XDG_RUNTIME_DIR/<name>.sock or /tmp/<name>-<uid>.sock.
 	sock := *socketPath
 	if sock == "" {
-		// Try common locations
-		candidates := []string{
-			filepath.Join(os.TempDir(), "go-cli-server.sock"),
-			"/tmp/go-cli-server.sock",
-		}
-		for _, c := range candidates {
-			if _, err := os.Stat(c); err == nil {
-				sock = c
-				break
-			}
-		}
-		if sock == "" {
-			fmt.Fprintln(os.Stderr, "Error: could not find hub socket. Use --socket flag.")
+		sock = socket.DefaultSocketPath(*socketName)
+		if _, err := os.Stat(sock); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: could not find hub socket at %s. Use --socket or --name.\n", sock)
 			os.Exit(1)
 		}
 	}
@@ -112,6 +105,7 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("Options:")
 	fmt.Println("  --socket <path>   Hub socket path")
+	fmt.Println("  --name <name>     Socket name for the default path (default go-cli-server)")
 }
 
 func execPing(writer *protocol.Writer, parser *protocol.Parser) {

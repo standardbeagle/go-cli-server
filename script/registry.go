@@ -50,15 +50,10 @@ type StateTransition struct {
 
 // Config holds the configuration for a script.
 type Config struct {
-	Run       string            // Shell command string
-	Command   string            // Executable name (used with Args)
-	Args      []string          // Command arguments (used with Command)
-	Shell     string            // Shell override
-	ShellArgs []string          // Shell arguments override
-	Autostart bool              // Start script when session opens
-	Env       map[string]string // Environment variables
-	Cwd       string            // Working directory
-	DependsOn []string          // Scripts that must be ready before this starts
+	Run     string            // Shell command string
+	Command string            // Executable name (used with Args)
+	Args    []string          // Command arguments (used with Command)
+	Env     map[string]string // Environment variables
 }
 
 const (
