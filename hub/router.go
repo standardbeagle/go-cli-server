@@ -696,6 +696,19 @@ func (sp *ManagedSubprocess) startCore(ctx context.Context) error {
 	// because only the CAS winner reaches here.
 	sp.newLifecycle()
 
+	// Re-check stopped AFTER installing the new lifecycle. An Unregister/stop that
+	// set stopped and cancelled between the check above and newLifecycle would
+	// otherwise have cancelled the OLD context while this fresh one stays live,
+	// leaking the health loop of an unregistered subprocess. If it fired, cancel
+	// the context we just installed and abort before connecting.
+	if sp.stopped.Load() {
+		sp.cancelLifecycle()
+		sp.state.Store(SubprocessStopped)
+		now := time.Now()
+		sp.stateChanged.Store(&now)
+		return fmt.Errorf("start aborted: subprocess stopped")
+	}
+
 	now := time.Now()
 	sp.stateChanged.Store(&now)
 
@@ -908,24 +921,29 @@ func (sp *ManagedSubprocess) stop(ctx context.Context) error {
 	}
 	sp.connMu.Unlock()
 
-	// Wait for goroutines
+	// Wait for goroutines. The background waiter stamps the terminal Stopped state
+	// once they drain, so the subprocess converges to Stopped even if the caller's
+	// ctx expires first. Without this, a ctx-cancelled stop() returned with state
+	// stuck at Stopping — and startCore now rejects Stopping, permanently bricking
+	// any future restart (e.g. a StopAll with a deadline on a slow-draining child).
+	sp.healthy.Store(false)
 	done := make(chan struct{})
 	go func() {
 		sp.wg.Wait()
+		sp.state.Store(SubprocessStopped)
+		stamp := time.Now()
+		sp.stateChanged.Store(&stamp)
 		close(done)
 	}()
 
 	select {
 	case <-done:
+		return nil
 	case <-ctx.Done():
+		// Goroutines still draining; the background waiter will stamp Stopped when
+		// they finish. Report the caller's cancellation.
 		return ctx.Err()
 	}
-
-	sp.state.Store(SubprocessStopped)
-	sp.healthy.Store(false)
-	sp.stateChanged.Store(&now)
-
-	return nil
 }
 
 // healthCheckLoop runs periodic health checks.

@@ -35,6 +35,11 @@ type SubprocessServer struct {
 
 	// State
 	running atomic.Bool
+	// lifeMu serializes Start() and Stop() so their epoch swaps (running CAS,
+	// shutdown channel, listener, and the shared WaitGroup) can never interleave —
+	// which otherwise caused a double-close panic, a wrong-listener close, and a
+	// WaitGroup-reuse race under concurrent Start||Stop.
+	lifeMu sync.Mutex
 	// shutdown is recreated on each Start and closed on Stop. shutMu guards the
 	// field itself so a restart's reassignment does not race readers in Wait() and
 	// handleConnection().
@@ -107,6 +112,11 @@ func (s *SubprocessServer) RegisterHandlers(handlers map[string]CommandHandler) 
 
 // Start starts the subprocess server.
 func (s *SubprocessServer) Start() error {
+	// Serialize the whole epoch setup against Stop() so a concurrent Start||Stop
+	// cannot swap listener/shutdown/wg out from under each other.
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+
 	// CAS instead of load-then-store so two concurrent Starts cannot both proceed.
 	if !s.running.CompareAndSwap(false, true) {
 		return fmt.Errorf("subprocess server already running")
@@ -119,14 +129,15 @@ func (s *SubprocessServer) Start() error {
 	s.shutdown = make(chan struct{})
 	s.shutMu.Unlock()
 
+	var listener net.Listener
 	var err error
 	switch s.config.Transport.Type {
 	case "unix":
 		// Remove stale socket file
 		os.Remove(s.config.Transport.Address)
-		s.listener, err = net.Listen("unix", s.config.Transport.Address)
+		listener, err = net.Listen("unix", s.config.Transport.Address)
 	case "tcp":
-		s.listener, err = net.Listen("tcp", s.config.Transport.Address)
+		listener, err = net.Listen("tcp", s.config.Transport.Address)
 	default:
 		s.running.Store(false) // roll back the CAS so a retry can start
 		return fmt.Errorf("unsupported transport type: %s", s.config.Transport.Type)
@@ -137,14 +148,22 @@ func (s *SubprocessServer) Start() error {
 		return fmt.Errorf("failed to start listener: %w", err)
 	}
 
+	s.listener = listener
 	s.wg.Add(1)
-	go s.acceptLoop()
+	// Pass the listener to the accept loop so it operates on THIS epoch's listener
+	// rather than re-reading the shared field, which a later Start could reassign.
+	go s.acceptLoop(listener)
 
 	return nil
 }
 
-// Stop stops the subprocess server gracefully.
+// Stop stops the subprocess server gracefully. It holds lifeMu for the whole
+// teardown (including the drain wait) so a concurrent Start cannot begin a new
+// epoch — and in particular cannot wg.Add while this wg.Wait is draining.
 func (s *SubprocessServer) Stop(ctx context.Context) error {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+
 	// CAS so two concurrent Stops cannot both reach close(shutdown), which
 	// panics on the second close.
 	if !s.running.CompareAndSwap(true, false) {
@@ -194,18 +213,21 @@ func (s *SubprocessServer) Address() string {
 	return s.listener.Addr().String()
 }
 
-// acceptLoop accepts incoming connections.
-func (s *SubprocessServer) acceptLoop() {
+// acceptLoop accepts incoming connections on the listener it was started with.
+func (s *SubprocessServer) acceptLoop(listener net.Listener) {
 	defer s.wg.Done()
 
 	for {
-		conn, err := s.listener.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
-			if s.running.Load() {
-				// Unexpected error
-				continue
+			// A closed listener (this epoch's Stop) terminates the loop. Checking
+			// net.ErrClosed rather than the shared running flag prevents a busy-spin
+			// when a later epoch has set running=true again.
+			if errors.Is(err, net.ErrClosed) || !s.running.Load() {
+				return
 			}
-			return
+			// Transient error; keep accepting.
+			continue
 		}
 
 		// Handle connection
