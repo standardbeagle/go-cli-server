@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 var (
@@ -94,6 +96,12 @@ func (sm *Manager) Listen() (net.Listener, error) {
 		return nil, fmt.Errorf("failed to cleanup stale socket: %w", err)
 	}
 
+	// NOTE: config.Mode (default 0600) cannot be meaningfully applied here. The
+	// transport is an AF_UNIX socket file under %TEMP%, and Windows does not honor
+	// Unix permission bits on it (os.Chmod only toggles the read-only attribute).
+	// Access control instead relies on %TEMP% being a per-user directory. True
+	// per-user enforcement would require named pipes with a security descriptor,
+	// which needs a non-x/sys dependency (go-winio) this module deliberately avoids.
 	listener, err := net.Listen("unix", sm.config.Path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create socket: %w", err)
@@ -275,7 +283,10 @@ func isProcessRunning(pid int) bool {
 	return true
 }
 
-// isPipeNotFound checks for socket not found errors.
+// isPipeNotFound checks for socket not found errors. It matches on Windows error
+// codes first: the previous English-only substring matching broke
+// ErrSocketNotFound — and therefore client auto-start — on localized Windows,
+// where the system returns the same codes with translated message text.
 func isPipeNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -283,6 +294,17 @@ func isPipeNotFound(err error) bool {
 	if os.IsNotExist(err) {
 		return true
 	}
+	for _, target := range []error{
+		windows.ERROR_FILE_NOT_FOUND,
+		windows.ERROR_PATH_NOT_FOUND,
+		windows.WSAECONNREFUSED,
+		windows.ERROR_PIPE_BUSY,
+	} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	// Best-effort English fallback for wrappers that lose the code.
 	errLower := strings.ToLower(err.Error())
 	return strings.Contains(errLower, "cannot find the file") ||
 		strings.Contains(errLower, "cannot find the path") ||
