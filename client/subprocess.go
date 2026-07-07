@@ -474,6 +474,9 @@ type SubprocessStdioServer struct {
 	handlersMu   sync.RWMutex
 	verbRegistry *protocol.VerbRegistry
 	running      atomic.Bool
+	input        io.ReadCloser
+	output       io.Writer
+	closeInput   bool
 }
 
 // NewSubprocessStdioServer creates a subprocess server that uses stdin/stdout.
@@ -481,7 +484,24 @@ func NewSubprocessStdioServer() *SubprocessStdioServer {
 	return &SubprocessStdioServer{
 		handlers:     make(map[string]CommandHandler),
 		verbRegistry: protocol.NewVerbRegistry(),
+		input:        os.Stdin,
+		output:       os.Stdout,
 	}
+}
+
+// NewSubprocessStdioServerWithIO creates a subprocess stdio server using the
+// provided streams. Stop closes input to unblock Run when it is waiting for the
+// next command.
+func NewSubprocessStdioServerWithIO(input io.ReadCloser, output io.Writer) *SubprocessStdioServer {
+	s := NewSubprocessStdioServer()
+	if input != nil {
+		s.input = input
+		s.closeInput = true
+	}
+	if output != nil {
+		s.output = output
+	}
+	return s
 }
 
 // RegisterHandler registers a command handler.
@@ -497,8 +517,8 @@ func (s *SubprocessStdioServer) RegisterHandler(verb string, handler CommandHand
 func (s *SubprocessStdioServer) Run() error {
 	s.running.Store(true)
 
-	parser := protocol.NewParserWithRegistry(os.Stdin, s.verbRegistry)
-	writer := protocol.NewWriter(os.Stdout)
+	parser := protocol.NewParserWithRegistry(s.input, s.verbRegistry)
+	writer := protocol.NewWriter(s.output)
 
 	for s.running.Load() {
 		cmd, err := parser.ParseCommand()
@@ -527,6 +547,9 @@ func (s *SubprocessStdioServer) Run() error {
 // Stop stops the stdio server.
 func (s *SubprocessStdioServer) Stop() {
 	s.running.Store(false)
+	if s.closeInput && s.input != nil {
+		_ = s.input.Close()
+	}
 }
 
 func (s *SubprocessStdioServer) handleCommand(cmd *protocol.Command) *protocol.Response {

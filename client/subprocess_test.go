@@ -475,3 +475,37 @@ func TestSubprocessStdioServer(t *testing.T) {
 		t.Error("Handler not registered")
 	}
 }
+
+func TestSubprocessStdioServerStopUnblocksRun(t *testing.T) {
+	inputR, inputW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inputW.Close()
+
+	outputR, outputW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outputR.Close()
+	defer outputW.Close()
+
+	server := NewSubprocessStdioServerWithIO(inputR, outputW)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Run()
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	server.Stop()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error after Stop = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Stop() did not unblock Run()")
+	}
+}
