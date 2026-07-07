@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -134,5 +136,38 @@ func TestScheduler_InMemoryScheduleAllowsEmptyProjectPath(t *testing.T) {
 	}
 	if task.ProjectPath != "" {
 		t.Fatalf("ProjectPath = %q, want empty", task.ProjectPath)
+	}
+}
+
+func TestStateManager_RemoveLastTaskClearsProject(t *testing.T) {
+	projectDir := t.TempDir()
+	sm := NewStateManager(DefaultStateConfig())
+	task := &Task{
+		ID:          "task-1",
+		TargetID:    "session-1",
+		Payload:     "payload",
+		DeliverAt:   time.Now().Add(time.Hour),
+		CreatedAt:   time.Now(),
+		ProjectPath: projectDir,
+		Status:      TaskStatusPending,
+	}
+
+	if err := sm.SaveTask(task); err != nil {
+		t.Fatalf("SaveTask() error = %v", err)
+	}
+	if got := sm.ListProjectsWithTasks(); len(got) != 1 || got[0] != projectDir {
+		t.Fatalf("ListProjectsWithTasks() after save = %#v, want [%q]", got, projectDir)
+	}
+
+	if err := sm.RemoveTask(task.ID, task.ProjectPath); err != nil {
+		t.Fatalf("RemoveTask() error = %v", err)
+	}
+	if got := sm.ListProjectsWithTasks(); len(got) != 0 {
+		t.Fatalf("ListProjectsWithTasks() after removing last task = %#v, want empty", got)
+	}
+
+	statePath := filepath.Join(projectDir, DefaultStateConfig().StateDir, DefaultStateConfig().StateFile)
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("state file stat err = %v, want not exist", err)
 	}
 }

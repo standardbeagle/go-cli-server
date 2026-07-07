@@ -141,7 +141,10 @@ func (m *StateManager) RemoveTask(taskID string, projectPath string) error {
 
 	// Save state (or remove file if empty)
 	if len(state.Tasks) == 0 {
-		os.Remove(statePath)
+		if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove empty state file: %w", err)
+		}
+		m.knownProjects.Delete(projectPath)
 		return nil
 	}
 
