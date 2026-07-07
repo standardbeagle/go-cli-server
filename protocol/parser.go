@@ -19,7 +19,35 @@ const (
 
 	// DataMarker separates arguments from data length
 	DataMarker = "--"
+
+	// MaxFrameSize caps how many bytes a single command/response frame may occupy
+	// before the terminator is seen. It bounds memory against a peer that opens a
+	// connection and never sends ";;".
+	MaxFrameSize = 16 << 20 // 16 MiB
 )
+
+// PartialFrameError indicates a read error occurred after some bytes of a frame
+// were already consumed from the stream. The stream is now desynchronized and
+// the connection must be closed — the buffered bytes cannot be recovered, so
+// resyncing or a timeout-continue would parse the remainder as garbage.
+type PartialFrameError struct {
+	Err error // underlying read error (may be a timeout)
+}
+
+func (e *PartialFrameError) Error() string {
+	return "partial frame, connection desynchronized: " + e.Err.Error()
+}
+
+func (e *PartialFrameError) Unwrap() error { return e.Err }
+
+// IsPartialFrame reports whether err is a PartialFrameError.
+func IsPartialFrame(err error) bool {
+	var pfe *PartialFrameError
+	return errors.As(err, &pfe)
+}
+
+// ErrFrameTooLarge indicates a frame exceeded MaxFrameSize without a terminator.
+var ErrFrameTooLarge = errors.New("frame exceeds maximum size without terminator")
 
 // VerbRegistry tracks registered command verbs for validation.
 type VerbRegistry struct {
@@ -256,13 +284,24 @@ func (p *Parser) readUntilTerminator(terminator string) (string, error) {
 	for {
 		b, err := p.reader.ReadByte()
 		if err != nil {
-			if err == io.EOF && buf.Len() > 0 {
-				return "", fmt.Errorf("unexpected EOF, missing terminator %q", terminator)
+			// A read error after partial data means the stream is desynchronized:
+			// the consumed bytes are gone from the reader and cannot be replayed.
+			// Signal a fatal, non-recoverable condition so the caller closes rather
+			// than continuing (which would parse the remainder as a new frame).
+			if buf.Len() > 0 {
+				if err == io.EOF {
+					err = fmt.Errorf("unexpected EOF, missing terminator %q", terminator)
+				}
+				return "", &PartialFrameError{Err: err}
 			}
 			return "", err
 		}
 
 		buf.WriteByte(b)
+
+		if buf.Len() > MaxFrameSize {
+			return "", ErrFrameTooLarge
+		}
 
 		if buf.Len() >= termLen {
 			tail := buf.Bytes()[buf.Len()-termLen:]
@@ -337,6 +376,51 @@ func (p *Parser) ParseResponse() (*Response, error) {
 	}
 
 	return resp, nil
+}
+
+// ValidateCommand rejects commands that would corrupt the wire format. The
+// protocol is whitespace-delimited and terminated by ";;", so a token containing
+// the terminator injects a second command, a newline breaks the frame, and a lone
+// "--" is misread as the data marker. Those are rejected in every token. An arg
+// carries a user-supplied value, so it must additionally be free of whitespace
+// that would silently split it into extra args; the verb/sub-verb are developer
+// constants (and may be a pre-joined command line the receiver re-splits), so
+// interior spaces there are allowed. Data payloads are exempt — base64-encoded.
+func ValidateCommand(cmd *Command) error {
+	if err := validateToken("verb", cmd.Verb, true); err != nil {
+		return err
+	}
+	if cmd.SubVerb != "" {
+		if err := validateToken("sub-verb", cmd.SubVerb, true); err != nil {
+			return err
+		}
+	}
+	for _, arg := range cmd.Args {
+		if err := validateToken("arg", arg, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateToken ensures a single wire token is safe to emit unescaped.
+func validateToken(kind, tok string, allowSpace bool) error {
+	if tok == "" {
+		return fmt.Errorf("%s cannot be empty", kind)
+	}
+	if strings.Contains(tok, CommandTerminator) {
+		return fmt.Errorf("%s %q contains terminator %q", kind, tok, CommandTerminator)
+	}
+	if strings.ContainsAny(tok, "\r\n") {
+		return fmt.Errorf("%s %q contains a newline", kind, tok)
+	}
+	if tok == DataMarker {
+		return fmt.Errorf("%s cannot be the data marker %q", kind, DataMarker)
+	}
+	if !allowSpace && strings.ContainsAny(tok, " \t") {
+		return fmt.Errorf("%s %q contains whitespace", kind, tok)
+	}
+	return nil
 }
 
 // FormatCommand formats a command for transmission.
@@ -427,6 +511,9 @@ func (w *Writer) WriteCommand(verb string, args []string, data []byte) error {
 		Args: args,
 		Data: data,
 	}
+	if err := ValidateCommand(cmd); err != nil {
+		return err
+	}
 	_, err := w.w.Write(FormatCommand(cmd))
 	return err
 }
@@ -439,20 +526,8 @@ func (w *Writer) WriteCommandWithSubVerb(verb, subVerb string, args []string, da
 		Args:    args,
 		Data:    data,
 	}
-	_, err := w.w.Write(FormatCommand(cmd))
-	return err
-}
-
-// WriteCommandWithData writes a command with optional data payload.
-// The subVerb parameter is optional (pass nil if not needed).
-func (w *Writer) WriteCommandWithData(verb string, args []string, subVerb *string, data []byte) error {
-	cmd := &Command{
-		Verb: verb,
-		Args: args,
-		Data: data,
-	}
-	if subVerb != nil {
-		cmd.SubVerb = *subVerb
+	if err := ValidateCommand(cmd); err != nil {
+		return err
 	}
 	_, err := w.w.Write(FormatCommand(cmd))
 	return err

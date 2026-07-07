@@ -3,7 +3,6 @@ package protocol
 import (
 	"encoding/base64"
 	"fmt"
-	"strconv"
 )
 
 // ResponseType indicates the type of response.
@@ -153,19 +152,4 @@ func FormatChunk(data []byte) []byte {
 // Format: END;;
 func FormatEnd() []byte {
 	return []byte("END" + CommandTerminator)
-}
-
-// ParseLengthPrefixed parses a length-prefixed response line.
-func ParseLengthPrefixed(line string, prefix string) (int, error) {
-	if len(line) <= len(prefix)+1 {
-		return 0, fmt.Errorf("invalid %s response: too short", prefix)
-	}
-
-	lengthStr := line[len(prefix)+1:]
-	length, err := strconv.Atoi(lengthStr)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s length: %w", prefix, err)
-	}
-
-	return length, nil
 }

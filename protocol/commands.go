@@ -7,7 +7,6 @@ type Command struct {
 	SubVerb     string   // Optional sub-verb (STATUS, OUTPUT, START, etc.)
 	Args        []string // Positional arguments
 	Data        []byte   // Optional binary/JSON data payload
-	SessionCode string   // Session code for scoping (optional)
 }
 
 // Built-in command verbs (core hub functionality)
