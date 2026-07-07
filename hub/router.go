@@ -23,17 +23,29 @@ type SubprocessRouter struct {
 	// Subprocess registry
 	subprocesses sync.Map // id -> *ManagedSubprocess
 
-	// Routing tables (rebuilt when subprocesses change)
-	exactRoutes  sync.Map // "PROXY START" -> subprocess ID
-	prefixRoutes sync.Map // "PROXY" -> subprocess ID
+	// routes is an immutable routing snapshot swapped atomically on every rebuild.
+	// Readers load the pointer once and read the maps lock-free; rebuildRoutes
+	// builds fresh maps and Stores a new pointer. This replaces the previous
+	// sync.Map fields, whose struct reassignment torn-raced routeToSubprocess.
+	routes atomic.Pointer[routeTable]
 
-	// Route version for cache invalidation
-	routeVersion atomic.Int64
+	// rebuildMu serializes rebuildRoutes. The build reads the live subprocesses
+	// map and Stores a fresh snapshot; two concurrent rebuilds could each miss the
+	// other's just-registered entry and the later Store would drop it, leaving a
+	// subprocess unroutable. Serializing makes the last build reflect the full map.
+	rebuildMu sync.Mutex
 
 	// Statistics
 	totalRouted     atomic.Int64
 	totalFailed     atomic.Int64
 	routingDuration atomic.Int64 // nanoseconds, for avg calculation
+}
+
+// routeTable is an immutable snapshot of command routing. It is never mutated
+// after publication; rebuildRoutes builds a new one and atomically swaps it in.
+type routeTable struct {
+	exact  map[string]string // "PROXY START" -> subprocess ID
+	prefix map[string]string // "PROXY" (or "FOO BAR") -> subprocess ID
 }
 
 // ManagedSubprocess represents a subprocess managed by the router.
@@ -74,6 +86,16 @@ type ManagedSubprocess struct {
 	// Health tracking
 	healthy          atomic.Bool
 	consecutiveFails atomic.Int32
+
+	// stopped is set by an explicit stop() and cleared by start(). doRestart
+	// consults it after its wait so a subprocess the user deliberately stopped is
+	// not resurrected by an auto-restart that was already in flight.
+	stopped atomic.Bool
+
+	// restarting guards the auto-restart path so a burst of failing health ticks
+	// (Interval < RestartWait) cannot spawn a storm of concurrent doRestart
+	// goroutines. Set before a restart is scheduled, cleared when it resolves.
+	restarting atomic.Bool
 
 	// Lifecycle. The context is held behind an atomic pointer so start()/restart
 	// can install a fresh one without racing readers (health loop, monitored
@@ -167,13 +189,46 @@ type SubprocessConn struct {
 	writer *protocol.Writer
 	closer func() error
 
+	// rd is the read side of the transport, used to enforce an I/O deadline so a
+	// hung subprocess cannot pin mu forever (which would wedge both routed
+	// commands and the shared health-check PING). nil when the transport does not
+	// support deadlines.
+	rd      interface{ SetReadDeadline(time.Time) error }
+	timeout time.Duration // per-command deadline; 0 disables
+
+	// inFlight counts routed commands currently holding or waiting on mu. The
+	// health-check PING shares this mu; a slow routed command would otherwise make
+	// the PING block until its deadline and count as a health failure, restarting a
+	// busy-but-healthy subprocess mid-work. doHealthCheck skips when inFlight > 0.
+	inFlight atomic.Int32
+
 	mu sync.Mutex
 }
+
+// busy reports whether a routed command is currently in flight.
+func (c *SubprocessConn) busy() bool { return c.inFlight.Load() > 0 }
 
 // SendCommand sends a command to the subprocess and reads the response.
 func (c *SubprocessConn) SendCommand(ctx context.Context, cmd *protocol.Command) (*protocol.Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Bound the exchange with a read deadline. Without it a hung subprocess would
+	// block ParseResponse while holding mu, so the health-check PING (same mu)
+	// could never fire and auto-restart would never trigger, while routed clients
+	// pile up unbounded. Prefer the caller's ctx deadline, else the configured
+	// timeout.
+	if c.rd != nil {
+		deadline, ok := ctx.Deadline()
+		if !ok && c.timeout > 0 {
+			deadline = time.Now().Add(c.timeout)
+			ok = true
+		}
+		if ok {
+			_ = c.rd.SetReadDeadline(deadline)
+			defer func() { _ = c.rd.SetReadDeadline(time.Time{}) }()
+		}
+	}
 
 	// Write the command using the Writer interface
 	var err error
@@ -186,10 +241,19 @@ func (c *SubprocessConn) SendCommand(ctx context.Context, cmd *protocol.Command)
 		return nil, fmt.Errorf("failed to write command: %w", err)
 	}
 
-	// Read response (this is blocking, context not directly supported by parser)
-	// TODO: Add context-aware reading with deadline
 	resp, err := c.parser.ParseResponse()
 	if err != nil {
+		// The read failed (deadline or transport error) but the subprocess may
+		// still deliver the late response into the socket buffer. If we leave the
+		// connection open, the NEXT SendCommand (routed command or health PING)
+		// reads this command's stale response as its own and every subsequent
+		// exchange is off-by-one forever. Tear the connection down so the next
+		// caller fails fast and the health loop forces a reconnect. Close inline
+		// (not via c.Close, which re-locks mu) since we already hold mu.
+		if c.closer != nil {
+			_ = c.closer()
+			c.closer = nil
+		}
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
@@ -211,6 +275,7 @@ func NewSubprocessRouter(hub *Hub) *SubprocessRouter {
 	r := &SubprocessRouter{
 		hub: hub,
 	}
+	r.routes.Store(&routeTable{exact: map[string]string{}, prefix: map[string]string{}})
 
 	// Register a catch-all handler that routes to subprocesses
 	_ = hub.RegisterCommand(CommandDefinition{
@@ -227,19 +292,18 @@ func (r *SubprocessRouter) Register(sp *ManagedSubprocess) error {
 		return fmt.Errorf("subprocess ID is required")
 	}
 
-	if _, exists := r.subprocesses.Load(sp.ID); exists {
-		return fmt.Errorf("subprocess %q already registered", sp.ID)
-	}
-
-	// Initialize state
+	// Initialize state before publishing so a concurrent reader never observes a
+	// half-built subprocess.
 	sp.state.Store(SubprocessPending)
 	now := time.Now()
 	sp.stateChanged.Store(&now)
-
-	// Create cancellable context
 	sp.newLifecycle()
 
-	r.subprocesses.Store(sp.ID, sp)
+	// LoadOrStore is the atomic register-once primitive; a plain Load-then-Store
+	// let two concurrent Registers of the same ID both win.
+	if _, loaded := r.subprocesses.LoadOrStore(sp.ID, sp); loaded {
+		return fmt.Errorf("subprocess %q already registered", sp.ID)
+	}
 	r.rebuildRoutes()
 
 	return nil
@@ -267,6 +331,16 @@ func (r *SubprocessRouter) Unregister(id string) error {
 	case <-time.After(5 * time.Second):
 	}
 
+	// Close the transport. Cancelling the lifecycle stops the goroutines but does
+	// not shut the socket/pipe fd; leaking one fd per register/unregister cycle
+	// eventually exhausts the descriptor table and Accept starts failing.
+	sp.connMu.Lock()
+	if sp.conn != nil {
+		_ = sp.conn.Close()
+		sp.conn = nil
+	}
+	sp.connMu.Unlock()
+
 	r.subprocesses.Delete(id)
 	r.rebuildRoutes()
 
@@ -292,11 +366,15 @@ func (r *SubprocessRouter) List() []*ManagedSubprocess {
 	return result
 }
 
-// rebuildRoutes rebuilds the routing tables from registered subprocesses.
+// rebuildRoutes builds a fresh immutable routing table and swaps it in
+// atomically. Never mutates the published table, so concurrent readers in
+// routeToSubprocess are safe.
 func (r *SubprocessRouter) rebuildRoutes() {
-	// Clear existing routes
-	r.exactRoutes = sync.Map{}
-	r.prefixRoutes = sync.Map{}
+	r.rebuildMu.Lock()
+	defer r.rebuildMu.Unlock()
+
+	exact := make(map[string]string)
+	prefix := make(map[string]string)
 
 	r.subprocesses.Range(func(key, value interface{}) bool {
 		sp := value.(*ManagedSubprocess)
@@ -308,14 +386,14 @@ func (r *SubprocessRouter) rebuildRoutes() {
 
 			// Check for wildcard suffix
 			if strings.HasSuffix(pattern, " *") || strings.HasSuffix(pattern, "*") {
-				prefix := strings.TrimSuffix(strings.TrimSuffix(pattern, "*"), " ")
-				r.prefixRoutes.Store(prefix, sp.ID)
+				p := strings.TrimSuffix(strings.TrimSuffix(pattern, "*"), " ")
+				prefix[p] = sp.ID
 				// Register the verb so the parser accepts it and reaches dispatch.
-				if prefix != "" {
-					protocol.DefaultRegistry.RegisterVerb(strings.Fields(prefix)[0])
+				if p != "" {
+					protocol.DefaultRegistry.RegisterVerb(strings.Fields(p)[0])
 				}
 			} else {
-				r.exactRoutes.Store(pattern, sp.ID)
+				exact[pattern] = sp.ID
 				// Register verb (and sub-verb for two-word patterns) with the parser so
 				// the command survives parsing and reaches routeToSubprocess.
 				fields := strings.Fields(pattern)
@@ -330,7 +408,7 @@ func (r *SubprocessRouter) rebuildRoutes() {
 		return true
 	})
 
-	r.routeVersion.Add(1)
+	r.routes.Store(&routeTable{exact: exact, prefix: prefix})
 }
 
 // routeToSubprocess is the handler that routes commands to subprocesses.
@@ -349,15 +427,18 @@ func (r *SubprocessRouter) routeToSubprocess(ctx context.Context, conn *Connecti
 		fullCmd = verb + " " + subverb
 	}
 
-	// Find the subprocess to route to
+	// Find the subprocess to route to from the immutable routing snapshot.
+	rt := r.routes.Load()
 	var subprocessID string
 
-	// 1. Try exact match
-	if id, ok := r.exactRoutes.Load(fullCmd); ok {
-		subprocessID = id.(string)
-	} else if id, ok := r.prefixRoutes.Load(verb); ok {
-		// 2. Try prefix match
-		subprocessID = id.(string)
+	// 1. Exact match ("FOO BAR"). 2. Multi-word prefix ("FOO BAR *" keyed as
+	// "FOO BAR"). 3. Single-verb prefix ("FOO *" keyed as "FOO").
+	if id, ok := rt.exact[fullCmd]; ok {
+		subprocessID = id
+	} else if id, ok := rt.prefix[fullCmd]; ok {
+		subprocessID = id
+	} else if id, ok := rt.prefix[verb]; ok {
+		subprocessID = id
 	}
 
 	if subprocessID == "" {
@@ -394,7 +475,11 @@ func (r *SubprocessRouter) routeToSubprocess(ctx context.Context, conn *Connecti
 	now := time.Now()
 	sp.lastCommand.Store(&now)
 
+	// Mark the connection busy so a concurrent health PING skips instead of
+	// blocking on mu behind this command and mistaking the wait for a failure.
+	spConn.inFlight.Add(1)
 	resp, err := spConn.SendCommand(ctx, cmd)
+	spConn.inFlight.Add(-1)
 	if err != nil {
 		sp.commandsFailed.Add(1)
 		r.totalFailed.Add(1)
@@ -547,35 +632,47 @@ type ManagedSubprocessStats struct {
 // GetRoutes returns the routing table for debugging.
 func (r *SubprocessRouter) GetRoutes() map[string]string {
 	routes := make(map[string]string)
+	rt := r.routes.Load()
 
-	r.exactRoutes.Range(func(key, value interface{}) bool {
-		routes[key.(string)] = value.(string) + " (exact)"
-		return true
-	})
-
-	r.prefixRoutes.Range(func(key, value interface{}) bool {
-		routes[key.(string)+" *"] = value.(string) + " (prefix)"
-		return true
-	})
+	for k, v := range rt.exact {
+		routes[k] = v + " (exact)"
+	}
+	for k, v := range rt.prefix {
+		routes[k+" *"] = v + " (prefix)"
+	}
 
 	return routes
 }
 
 // start starts the subprocess.
 func (sp *ManagedSubprocess) start(ctx context.Context) error {
-	state := sp.state.Load().(ManagedSubprocessState)
-	if state == SubprocessRunning || state == SubprocessStarting {
-		return fmt.Errorf("subprocess already %s", state)
+	// CAS into Starting so two concurrent start() calls cannot both proceed
+	// (which would double-connect, leak fds, and run dual health loops). The
+	// load-then-store pattern this replaces violated the CAS mandate.
+	for {
+		state := sp.state.Load().(ManagedSubprocessState)
+		// Reject Stopping too: a start() that proceeds from Stopping would install
+		// a fresh lifecycle/conn onto the same wg an in-flight stop() is blocked on,
+		// so stop() then stamps Stopped over a live Running subprocess (dangling
+		// connection + health loop reporting stopped). Back-to-back STOP/START
+		// triggered it. The caller must wait for stop() to finish.
+		if state == SubprocessRunning || state == SubprocessStarting || state == SubprocessStopping {
+			return fmt.Errorf("subprocess busy: %s", state)
+		}
+		if sp.state.CompareAndSwap(state, SubprocessStarting) {
+			break
+		}
 	}
+
+	// A fresh start clears any prior user-stop marker so auto-restart is armed again.
+	sp.stopped.Store(false)
 
 	// Establish a fresh lifecycle context. A prior stop() or restart cancels the
 	// old one; without recreating it here a stopped subprocess could never be
-	// started again (its exec/health goroutines would exit immediately). This is
-	// safe because we only reach here from a non-running state, after any previous
-	// worker goroutines have drained.
+	// started again (its exec/health goroutines would exit immediately). Safe
+	// because only the CAS winner reaches here.
 	sp.newLifecycle()
 
-	sp.state.Store(SubprocessStarting)
 	now := time.Now()
 	sp.stateChanged.Store(&now)
 
@@ -636,9 +733,11 @@ func (sp *ManagedSubprocess) connectUnix(ctx context.Context) error {
 
 	sp.connMu.Lock()
 	sp.conn = &SubprocessConn{
-		parser: protocol.NewParser(conn),
-		writer: protocol.NewWriter(conn),
-		closer: conn.Close,
+		parser:  protocol.NewParser(conn),
+		writer:  protocol.NewWriter(conn),
+		closer:  conn.Close,
+		rd:      conn,
+		timeout: timeout,
 	}
 	sp.connMu.Unlock()
 
@@ -668,9 +767,11 @@ func (sp *ManagedSubprocess) connectTCP(ctx context.Context) error {
 
 	sp.connMu.Lock()
 	sp.conn = &SubprocessConn{
-		parser: protocol.NewParser(conn),
-		writer: protocol.NewWriter(conn),
-		closer: conn.Close,
+		parser:  protocol.NewParser(conn),
+		writer:  protocol.NewWriter(conn),
+		closer:  conn.Close,
+		rd:      conn,
+		timeout: timeout,
 	}
 	sp.connMu.Unlock()
 
@@ -710,11 +811,24 @@ func (sp *ManagedSubprocess) startStdio(ctx context.Context) error {
 		return fmt.Errorf("failed to start command: %w", err)
 	}
 
+	// stdout/stderr pipes are *os.File, which supports read deadlines — wire it so
+	// a hung stdio child gets the same deadline protection as socket transports.
+	var rd interface{ SetReadDeadline(time.Time) error }
+	if f, ok := stdout.(interface{ SetReadDeadline(time.Time) error }); ok {
+		rd = f
+	}
+	timeout := sp.Transport.Timeout
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
+
 	// Create subprocess connection
 	sp.connMu.Lock()
 	sp.conn = &SubprocessConn{
-		parser: protocol.NewParser(stdout),
-		writer: protocol.NewWriter(stdin),
+		parser:  protocol.NewParser(stdout),
+		writer:  protocol.NewWriter(stdin),
+		rd:      rd,
+		timeout: timeout,
 		closer: func() error {
 			stdin.Close()
 			stdout.Close()
@@ -733,6 +847,10 @@ func (sp *ManagedSubprocess) startStdio(ctx context.Context) error {
 			now := time.Now()
 			sp.stateChanged.Store(&now)
 			sp.healthy.Store(false)
+			// A crashed stdio child must be resurrected here: doHealthCheck
+			// early-returns for non-Running state, so nothing else would ever
+			// trigger auto-restart for it.
+			sp.triggerAutoRestart()
 		}
 	}()
 
@@ -745,6 +863,10 @@ func (sp *ManagedSubprocess) stop(ctx context.Context) error {
 	if state != SubprocessRunning {
 		return nil
 	}
+
+	// Mark as user-stopped before anything else so an auto-restart already in
+	// flight (doRestart past its wait) sees the marker and does not resurrect us.
+	sp.stopped.Store(true)
 
 	sp.state.Store(SubprocessStopping)
 	now := time.Now()
@@ -818,6 +940,13 @@ func (sp *ManagedSubprocess) doHealthCheck() {
 		return
 	}
 
+	// A routed command in flight demonstrates the subprocess is alive; the PING
+	// would only queue behind it on mu and time out on contention. Skip this tick
+	// without counting a failure so a busy subprocess is not killed mid-work.
+	if conn.busy() {
+		return
+	}
+
 	// Create timeout context for health check
 	timeout := sp.HealthCheck.Timeout
 	if timeout == 0 {
@@ -879,55 +1008,81 @@ func (sp *ManagedSubprocess) triggerAutoRestart() {
 		return
 	}
 
+	// Single-flight: further failing ticks are ignored until the in-flight restart
+	// resolves. Without this, Interval < RestartWait spawns a storm of concurrent
+	// doRestart goroutines that inflate restartCount and exhaust the budget.
+	if !sp.restarting.CompareAndSwap(false, true) {
+		return
+	}
+
 	// Schedule restart in a detached goroutine. It is intentionally NOT tracked by
 	// sp.wg: doRestart waits on sp.wg for the current health/monitor goroutines to
 	// drain, and tracking itself in the same WaitGroup would deadlock that wait.
 	go sp.doRestart()
 }
 
-// doRestart tears down the current subprocess instance and starts a fresh one.
+// doRestart tears down the current subprocess instance and starts a fresh one,
+// retrying on failure so a single failed attempt does not permanently brick the
+// subprocess (a failed start starts no health loop, so nothing else retriggers).
 func (sp *ManagedSubprocess) doRestart() {
-	// Wait for the restart delay, aborting if a shutdown was requested meanwhile.
-	if sp.RestartWait > 0 {
-		select {
-		case <-sp.currentCtx().Done():
-			return
-		case <-time.After(sp.RestartWait):
+	defer sp.restarting.Store(false)
+
+	for {
+		// Wait for the restart delay, aborting if a shutdown was requested. After a
+		// failed attempt start() installs a fresh (live) context, so this select
+		// only unblocks early on a real stop()/Unregister.
+		if sp.RestartWait > 0 {
+			select {
+			case <-sp.currentCtx().Done():
+				return
+			case <-time.After(sp.RestartWait):
+			}
 		}
-	}
 
-	// Cancel the old context so the health loop and any monitored process stop,
-	// then wait for those goroutines to exit before reconnecting. start() will
-	// install a fresh context.
-	sp.cancelLifecycle()
-	sp.wg.Wait()
+		// Abort if the user deliberately stopped the subprocess while this restart
+		// was waiting — resurrecting it would fight an explicit stop().
+		if sp.stopped.Load() {
+			return
+		}
 
-	// Close the stale connection.
-	sp.connMu.Lock()
-	if sp.conn != nil {
-		sp.conn.Close()
-		sp.conn = nil
-	}
-	sp.connMu.Unlock()
+		// Cancel the old context so the health loop and any monitored process stop,
+		// then wait for those goroutines to exit before reconnecting.
+		sp.cancelLifecycle()
+		sp.wg.Wait()
 
-	sp.restartCount.Add(1)
-	sp.consecutiveFails.Store(0)
-	sp.healthy.Store(false)
+		// Close the stale connection.
+		sp.connMu.Lock()
+		if sp.conn != nil {
+			sp.conn.Close()
+			sp.conn = nil
+		}
+		sp.connMu.Unlock()
 
-	// Reset state so start() proceeds — it refuses to start from Running/Starting.
-	sp.state.Store(SubprocessStopped)
-	now := time.Now()
-	sp.stateChanged.Store(&now)
+		sp.restartCount.Add(1)
+		sp.consecutiveFails.Store(0)
+		sp.healthy.Store(false)
 
-	// Use a background-derived timeout for the attempt; the just-cancelled sp.ctx
-	// must not be used here.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := sp.start(ctx); err != nil {
-		// Start failed — the next health check will retry if still unhealthy.
-		sp.state.Store(SubprocessFailed)
+		// Reset state so start() proceeds — it refuses to start from Running/Starting.
+		sp.state.Store(SubprocessStopped)
 		now := time.Now()
 		sp.stateChanged.Store(&now)
+
+		// Background-derived timeout; the just-cancelled lifecycle ctx must not be used.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := sp.start(ctx)
+		cancel()
+		if err == nil {
+			return // healthy again; a fresh health loop is running
+		}
+
+		sp.state.Store(SubprocessFailed)
+		now = time.Now()
+		sp.stateChanged.Store(&now)
+
+		// Give up once the restart budget is exhausted; otherwise loop and retry
+		// after RestartWait.
+		if sp.MaxRestarts > 0 && int(sp.restartCount.Load()) >= sp.MaxRestarts {
+			return
+		}
 	}
 }
