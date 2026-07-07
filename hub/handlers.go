@@ -206,12 +206,38 @@ func (h *Hub) handleRun(ctx context.Context, conn *Connection, cmd *protocol.Com
 		return conn.WriteMissingParam("RUN", "command", "command or script_name required")
 	}
 
+	// Resolve a script_name to its command. Previously script_name was validated
+	// as an acceptable alternative to command but then dropped, so procCfg.Command
+	// stayed empty and RUN started an empty process. Fail fast instead of that.
+	command, args, env := cfg.Command, cfg.Args, cfg.Env
+	id := cfg.ID
+	if command == "" && cfg.ScriptName != "" {
+		reg := h.pm.ScriptRegistry()
+		if reg == nil {
+			return conn.WriteInternalErr("script registry not configured; cannot run by script_name")
+		}
+		entry, ok := reg.Get(cfg.ScriptName, normalizePath(cfg.Path))
+		if !ok {
+			return conn.WriteNotFound("script", fmt.Sprintf("%s in %s", cfg.ScriptName, cfg.Path))
+		}
+		command, args = entry.ResolvedCommand()
+		if command == "" {
+			return conn.WriteInternalErr(fmt.Sprintf("script %q has no resolved command", cfg.ScriptName))
+		}
+		if id == "" {
+			id = entry.ProcessID // link the process to its script entry
+		}
+		if len(env) == 0 && entry.Config != nil {
+			env = mapToEnv(entry.Config.Env)
+		}
+	}
+
 	procCfg := process.ProcessConfig{
-		ID:          cfg.ID,
+		ID:          id,
 		ProjectPath: cfg.Path,
-		Command:     cfg.Command,
-		Args:        cfg.Args,
-		Env:         cfg.Env,
+		Command:     command,
+		Args:        args,
+		Env:         env,
 		EnableStdin: cfg.EnableStdin,
 	}
 

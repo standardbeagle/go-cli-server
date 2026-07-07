@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/standardbeagle/go-cli-server/process"
 	"github.com/standardbeagle/go-cli-server/protocol"
 	"github.com/standardbeagle/go-cli-server/script"
 )
@@ -256,15 +257,60 @@ func (h *Hub) handleScriptRestart(ctx context.Context, conn *Connection, cmd *pr
 	entry.AddRestartMarker()
 	entry.SetState(script.StateRestarting)
 
+	// Actually start a fresh process so RESTART restarts rather than just stopping.
+	// The command comes from the entry's resolved command (set when it was first
+	// started) or, failing that, an explicit Config.Command. A script whose only
+	// definition is a Run string cannot be resolved here — resolution is the
+	// upstream caller's job — so for that case we retain the prior mark-only
+	// behavior rather than start an empty process.
+	scmd, sargs := entry.ResolvedCommand()
+	if scmd == "" && entry.Config != nil && entry.Config.Command != "" {
+		scmd, sargs = entry.Config.Command, entry.Config.Args
+	}
+	msg := fmt.Sprintf("script %q restarted", name)
+	if scmd != "" {
+		var env []string
+		if entry.Config != nil {
+			env = mapToEnv(entry.Config.Env)
+		}
+		if _, err := h.pm.StartOrReuse(ctx, process.ProcessConfig{
+			ID:          entry.ProcessID,
+			ProjectPath: entry.ProjectPath,
+			WorkingDir:  entry.ProjectPath,
+			Command:     scmd,
+			Args:        sargs,
+			Env:         env,
+		}); err != nil {
+			entry.SetState(script.StateFailed)
+			entry.SetLastError(err.Error())
+			return conn.WriteInternalErr(fmt.Sprintf("failed to restart script %q: %v", name, err))
+		}
+	} else {
+		msg = fmt.Sprintf("script %q marked for restart (no resolved command to launch)", name)
+	}
+
 	resp := map[string]any{
 		"name":       name,
 		"process_id": entry.ProcessID,
 		"state":      entry.State().String(),
 		"success":    true,
-		"message":    fmt.Sprintf("script %q stopped for restart", name),
+		"message":    msg,
 	}
 	data, _ := json.Marshal(resp)
 	return conn.WriteJSON(data)
+}
+
+// mapToEnv converts a map of environment variables to the "KEY=VALUE" slice form
+// used by ProcessConfig. Returns nil for an empty map.
+func mapToEnv(m map[string]string) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	env := make([]string, 0, len(m))
+	for k, v := range m {
+		env = append(env, k+"="+v)
+	}
+	return env
 }
 
 // handleScriptStop handles SCRIPT STOP <name>.
