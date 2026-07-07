@@ -174,14 +174,18 @@ func (pm *ProcessManager) GetByPath(id, projectPath string) (*ManagedProcess, er
 // Remove deletes a process from the registry by ID.
 func (pm *ProcessManager) Remove(id string) bool {
 	var keyToDelete string
+	count := 0
 	pm.processes.Range(func(key, value any) bool {
 		proc := value.(*ManagedProcess)
 		if proc.ID == id {
 			keyToDelete = key.(string)
-			return false
+			count++
 		}
-		return true
+		return count < 2
 	})
+	if count > 1 {
+		return false
+	}
 	if keyToDelete != "" {
 		if _, loaded := pm.processes.LoadAndDelete(keyToDelete); loaded {
 			pm.activeCount.Add(-1)

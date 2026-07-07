@@ -272,6 +272,36 @@ func TestRemove(t *testing.T) {
 	}
 }
 
+func TestRemoveAmbiguousDoesNotDelete(t *testing.T) {
+	pm := NewProcessManager(ManagerConfig{HealthCheckPeriod: 0})
+
+	proc1 := NewManagedProcess(ProcessConfig{
+		ID:          "same-id",
+		ProjectPath: "/project/a",
+		Command:     "echo",
+	})
+	proc2 := NewManagedProcess(ProcessConfig{
+		ID:          "same-id",
+		ProjectPath: "/project/b",
+		Command:     "echo",
+	})
+	_ = pm.Register(proc1)
+	_ = pm.Register(proc2)
+
+	if pm.Remove("same-id") {
+		t.Fatal("Remove() should return false for ambiguous bare ID")
+	}
+	if pm.ActiveCount() != 2 {
+		t.Fatalf("ActiveCount after ambiguous Remove = %d, want 2", pm.ActiveCount())
+	}
+	if _, err := pm.GetByPath("same-id", "/project/a"); err != nil {
+		t.Fatalf("project/a process was removed: %v", err)
+	}
+	if _, err := pm.GetByPath("same-id", "/project/b"); err != nil {
+		t.Fatalf("project/b process was removed: %v", err)
+	}
+}
+
 // TestRemoveByPath verifies process removal by ID and path.
 func TestRemoveByPath(t *testing.T) {
 	pm := NewProcessManager(ManagerConfig{HealthCheckPeriod: 0})
@@ -769,7 +799,7 @@ func TestErrorTypes(t *testing.T) {
 
 	// Verify they have distinct messages
 	msgs := map[string]bool{}
-	for _, err := range []error{ErrProcessExists, ErrProcessNotFound, ErrInvalidState, ErrShuttingDown, ErrStdinNotEnabled} {
+	for _, err := range []error{ErrProcessExists, ErrProcessNotFound, ErrProcessAmbiguous, ErrInvalidState, ErrShuttingDown, ErrStdinNotEnabled} {
 		msg := err.Error()
 		if msgs[msg] {
 			t.Errorf("Duplicate error message: %q", msg)
