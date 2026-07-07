@@ -127,8 +127,8 @@ func (c *AutoStartConn) startHub() error {
 		} else if isGoTestBinary(selfPath) {
 			// Refuse to self-spawn a Go test binary. Without a dedicated
 			// daemon binary next to it, falling through to selfPath would
-			// invoke the test binary with subcommand args like
-			// "daemon start --socket /path". The test binary's flag.Parse()
+			// invoke the test binary with hub args like "--socket /path".
+			// The test binary's flag.Parse()
 			// ignores positional args and runs the entire test suite
 			// recursively, producing long-lived leaked processes that stay
 			// alive for hours and break subsequent test runs.

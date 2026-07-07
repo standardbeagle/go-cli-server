@@ -486,6 +486,7 @@ func NewSubprocessStdioServer() *SubprocessStdioServer {
 		verbRegistry: protocol.NewVerbRegistry(),
 		input:        os.Stdin,
 		output:       os.Stdout,
+		closeInput:   true,
 	}
 }
 
@@ -496,7 +497,6 @@ func NewSubprocessStdioServerWithIO(input io.ReadCloser, output io.Writer) *Subp
 	s := NewSubprocessStdioServer()
 	if input != nil {
 		s.input = input
-		s.closeInput = true
 	}
 	if output != nil {
 		s.output = output

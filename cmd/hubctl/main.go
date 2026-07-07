@@ -41,7 +41,7 @@ func main() {
 
 	// Determine socket path. When not given explicitly, derive the same default
 	// the hub uses (socket.DefaultSocketPath) so hubctl and the hub agree on the
-	// path — $XDG_RUNTIME_DIR/<name>.sock or /tmp/<name>-<uid>.sock.
+	// path — $XDG_RUNTIME_DIR/<name>.sock or /tmp/<name>-<uid>/<name>.sock.
 	sock := *socketPath
 	if sock == "" {
 		sock = socket.DefaultSocketPath(*socketName)

@@ -52,7 +52,7 @@ func DefaultSocketPath(name string) string {
 		return filepath.Join(dir, name+".sock")
 	}
 	// Fallback: nest the socket inside a per-uid directory rather than a bare
-	// /tmp/<name>-<uid>.sock. /tmp is world-writable and sticky, so any local user
+	// /tmp/<name>-<uid>/<name>.sock. /tmp is world-writable and sticky, so any local user
 	// could pre-create that bare path and squat it (permanent DoS) or impersonate
 	// the hub. A 0700 uid-owned directory — enforced at bind time by
 	// secureSocketDir — closes that vector.

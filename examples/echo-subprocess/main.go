@@ -8,7 +8,7 @@
 // Usage:
 //
 //	# Start the hub first
-//	go-cli-server serve --socket /tmp/hub.sock
+//	go-cli-hub --socket /tmp/hub.sock
 //
 //	# Then run this example
 //	go run main.go --hub /tmp/hub.sock
