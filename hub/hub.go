@@ -275,7 +275,15 @@ func (h *Hub) acceptLoop() {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
 			}
-			// Fatal error or listener closed
+			// Fatal error (e.g. fd exhaustion) with no shutdown in progress: the
+			// accept loop can no longer serve, and simply returning would leave a
+			// zombie hub still holding the socket path (blocking restarts, and
+			// squattable). Drive a full shutdown so the socket/pid files are
+			// released. Stop is idempotent and waits on this goroutine's wg slot,
+			// which we release by returning immediately.
+			if !h.shutdown.Load() {
+				go h.Stop(context.Background())
+			}
 			return
 		}
 
