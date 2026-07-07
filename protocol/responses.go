@@ -3,7 +3,25 @@ package protocol
 import (
 	"encoding/base64"
 	"fmt"
+	"strings"
 )
+
+// sanitizeMessage neutralizes wire-breaking sequences in a free-text response
+// message. The frame ends at ";;" and is whitespace-delimited, so a message
+// carrying the terminator or a newline (e.g. err.Error() echoed back) would
+// inject a second frame or desync the stream. This is remotely reachable, so it
+// must be sanitized at the formatting boundary.
+func sanitizeMessage(s string) string {
+	// ReplaceAll is non-overlapping, so a single pass leaves odd semicolon runs
+	// intact: ";;;" -> "; ;;" still carries a terminator. Loop until no ";;"
+	// survives so no residual run can inject a second frame.
+	for strings.Contains(s, CommandTerminator) {
+		s = strings.ReplaceAll(s, CommandTerminator, "; ;")
+	}
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
+}
 
 // ResponseType indicates the type of response.
 type ResponseType string
@@ -112,13 +130,13 @@ func FormatOK(message string) []byte {
 	if message == "" {
 		return []byte("OK" + CommandTerminator)
 	}
-	return []byte(fmt.Sprintf("OK %s%s", message, CommandTerminator))
+	return []byte(fmt.Sprintf("OK %s%s", sanitizeMessage(message), CommandTerminator))
 }
 
 // FormatErr formats an error response.
 // Format: ERR code message;;
 func FormatErr(code ErrorCode, message string) []byte {
-	return []byte(fmt.Sprintf("ERR %s %s%s", code, message, CommandTerminator))
+	return []byte(fmt.Sprintf("ERR %s %s%s", code, sanitizeMessage(message), CommandTerminator))
 }
 
 // FormatPong formats a PONG response.
