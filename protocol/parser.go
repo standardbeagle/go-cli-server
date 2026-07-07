@@ -417,8 +417,10 @@ func validateToken(kind, tok string, allowSpace bool) error {
 	if strings.ContainsAny(tok, "\r\n") {
 		return fmt.Errorf("%s %q contains a newline", kind, tok)
 	}
-	if tok == DataMarker {
-		return fmt.Errorf("%s cannot be the data marker %q", kind, DataMarker)
+	for _, field := range strings.Fields(tok) {
+		if field == DataMarker {
+			return fmt.Errorf("%s cannot contain the data marker %q", kind, DataMarker)
+		}
 	}
 	if !allowSpace {
 		for _, r := range tok {

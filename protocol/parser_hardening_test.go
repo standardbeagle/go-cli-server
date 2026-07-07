@@ -18,6 +18,8 @@ func TestValidateCommand(t *testing.T) {
 		{"good args", &Command{Verb: "PROC", SubVerb: "STOP", Args: []string{"id-1"}}, false},
 		{"terminator in arg", &Command{Verb: "PROC", Args: []string{"a;;b"}}, true},
 		{"terminator in verb", &Command{Verb: "PI;;NG"}, true},
+		{"data marker in prejoined verb", &Command{Verb: "SCRIPT -- 4"}, true},
+		{"data marker in prejoined subverb", &Command{Verb: "SCRIPT", SubVerb: "GET -- 4"}, true},
 		{"newline in arg", &Command{Verb: "PROC", Args: []string{"a\nb"}}, true},
 		{"space in arg", &Command{Verb: "PROC", Args: []string{"a b"}}, true},
 		{"lone data marker arg", &Command{Verb: "PROC", Args: []string{"--"}}, true},
