@@ -250,6 +250,12 @@ func (s *Scheduler) checkDueTasks() {
 		}
 		task.mu.Unlock()
 		if due {
+			// Track the delivery goroutine on the WaitGroup so Stop() waits for
+			// in-flight deliveries to finish instead of returning while they still
+			// write task state — which, across a Stop→Start cycle, could double
+			// deliver. Safe to Add here: this runs from run(), whose own wg count is
+			// still held, so the counter cannot be at zero concurrently with Wait.
+			s.wg.Add(1)
 			go s.deliverTask(task)
 		}
 		return true
@@ -259,6 +265,8 @@ func (s *Scheduler) checkDueTasks() {
 // deliverTask attempts to deliver a scheduled task. The caller has already set
 // task.delivering; this function clears it once the attempt resolves.
 func (s *Scheduler) deliverTask(task *Task) {
+	defer s.wg.Done()
+
 	// Snapshot immutable delivery inputs under the lock.
 	task.mu.Lock()
 	targetID, payload := task.TargetID, task.Payload
@@ -271,6 +279,23 @@ func (s *Scheduler) deliverTask(task *Task) {
 
 	task.mu.Lock()
 	task.delivering = false
+
+	// Cancelled while this delivery was in flight: respect the cancellation, do
+	// not overwrite the terminal Cancelled status with Delivered/Failed.
+	if task.Status == TaskStatusCancelled {
+		task.mu.Unlock()
+		return
+	}
+
+	// Scheduler shutting down: the delivery ctx was cancelled out from under us,
+	// so a failure here is not a real delivery failure. Leave the task Pending
+	// (don't burn an attempt) so a future Start retries it.
+	if err != nil && s.ctx.Err() != nil {
+		task.mu.Unlock()
+		s.persistTask(task)
+		return
+	}
+
 	if err != nil {
 		task.Attempts++
 		task.LastError = err.Error()

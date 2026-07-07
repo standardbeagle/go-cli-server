@@ -3,7 +3,9 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -94,9 +96,15 @@ func (s *SubprocessServer) RegisterHandlers(handlers map[string]CommandHandler) 
 
 // Start starts the subprocess server.
 func (s *SubprocessServer) Start() error {
-	if s.running.Load() {
+	// CAS instead of load-then-store so two concurrent Starts cannot both proceed.
+	if !s.running.CompareAndSwap(false, true) {
 		return fmt.Errorf("subprocess server already running")
 	}
+
+	// Reinstate a fresh shutdown channel. Stop() closed the previous one; without
+	// recreating it a restarted server's connection handlers would see the closed
+	// channel and exit immediately, so Start() would "succeed" onto a dead server.
+	s.shutdown = make(chan struct{})
 
 	var err error
 	switch s.config.Transport.Type {
@@ -107,14 +115,15 @@ func (s *SubprocessServer) Start() error {
 	case "tcp":
 		s.listener, err = net.Listen("tcp", s.config.Transport.Address)
 	default:
+		s.running.Store(false) // roll back the CAS so a retry can start
 		return fmt.Errorf("unsupported transport type: %s", s.config.Transport.Type)
 	}
 
 	if err != nil {
+		s.running.Store(false)
 		return fmt.Errorf("failed to start listener: %w", err)
 	}
 
-	s.running.Store(true)
 	s.wg.Add(1)
 	go s.acceptLoop()
 
@@ -123,11 +132,11 @@ func (s *SubprocessServer) Start() error {
 
 // Stop stops the subprocess server gracefully.
 func (s *SubprocessServer) Stop(ctx context.Context) error {
-	if !s.running.Load() {
+	// CAS so two concurrent Stops cannot both reach close(s.shutdown), which
+	// panics on the second close.
+	if !s.running.CompareAndSwap(true, false) {
 		return nil
 	}
-
-	s.running.Store(false)
 	close(s.shutdown)
 
 	// Close listener
@@ -390,8 +399,8 @@ func (s *SubprocessStdioServer) Run() error {
 			if !s.running.Load() {
 				return nil
 			}
-			// Check for EOF
-			if err.Error() == "EOF" {
+			// Check for EOF (compare the sentinel, not its string form)
+			if errors.Is(err, io.EOF) {
 				return nil
 			}
 			continue
@@ -446,12 +455,17 @@ func writeStdioResponse(writer *protocol.Writer, resp *protocol.Response) {
 // RegisterWithHub connects to a hub and registers this process as a subprocess.
 // This is a convenience function for the registration flow.
 func RegisterWithHub(socketPath string, config protocol.SubprocessRegisterConfig) error {
-	// Connect to hub
-	conn, err := net.Dial("unix", socketPath)
+	// Connect to hub with a bounded dial + exchange. Without a timeout a hung or
+	// half-open hub would block registration (and any caller waiting on it)
+	// forever.
+	conn, err := net.DialTimeout("unix", socketPath, 10*time.Second)
 	if err != nil {
 		return fmt.Errorf("failed to connect to hub: %w", err)
 	}
 	defer conn.Close()
+
+	// Bound the register/response round-trip too.
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 	parser := protocol.NewParser(conn)
 	writer := protocol.NewWriter(conn)
@@ -551,11 +565,43 @@ type pipeConn struct {
 	cmd    *exec.Cmd
 }
 
-func (p *pipeConn) Read(b []byte) (int, error)         { return p.reader.Read(b) }
-func (p *pipeConn) Write(b []byte) (int, error)        { return p.writer.Write(b) }
-func (p *pipeConn) Close() error                       { return p.cmd.Process.Kill() }
-func (p *pipeConn) LocalAddr() net.Addr                { return nil }
-func (p *pipeConn) RemoteAddr() net.Addr               { return nil }
-func (p *pipeConn) SetDeadline(t time.Time) error      { return nil }
-func (p *pipeConn) SetReadDeadline(t time.Time) error  { return nil }
-func (p *pipeConn) SetWriteDeadline(t time.Time) error { return nil }
+func (p *pipeConn) Read(b []byte) (int, error)  { return p.reader.Read(b) }
+func (p *pipeConn) Write(b []byte) (int, error) { return p.writer.Write(b) }
+func (p *pipeConn) Close() error                { return p.cmd.Process.Kill() }
+func (p *pipeConn) LocalAddr() net.Addr         { return nil }
+func (p *pipeConn) RemoteAddr() net.Addr        { return nil }
+
+// deadliner is the subset of net.Conn deadline behavior. exec's stdin/stdout
+// pipes are *os.File, which supports read/write deadlines, so we delegate rather
+// than silently no-op — a no-op meant a hung stdio subprocess blocked the hub
+// read forever.
+type deadliner interface{ SetDeadline(time.Time) error }
+type readDeadliner interface{ SetReadDeadline(time.Time) error }
+type writeDeadliner interface{ SetWriteDeadline(time.Time) error }
+
+func (p *pipeConn) SetDeadline(t time.Time) error {
+	// A pipe half only supports the deadline for its own direction; set each on
+	// the corresponding end.
+	_ = p.SetReadDeadline(t)
+	return p.SetWriteDeadline(t)
+}
+
+func (p *pipeConn) SetReadDeadline(t time.Time) error {
+	if d, ok := p.reader.(readDeadliner); ok {
+		return d.SetReadDeadline(t)
+	}
+	if d, ok := p.reader.(deadliner); ok {
+		return d.SetDeadline(t)
+	}
+	return nil
+}
+
+func (p *pipeConn) SetWriteDeadline(t time.Time) error {
+	if d, ok := p.writer.(writeDeadliner); ok {
+		return d.SetWriteDeadline(t)
+	}
+	if d, ok := p.writer.(deadliner); ok {
+		return d.SetDeadline(t)
+	}
+	return nil
+}
