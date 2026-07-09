@@ -105,6 +105,81 @@ func (r *CommandRegistry) RegisterSubHandler(verb, subVerb string, handler Comma
 	return nil
 }
 
+// Extend adds one or more sub-verb handlers to an existing verb without
+// replacing the verb's default handler. It is intended for library consumers
+// that use a shared built-in command surface and need to add product-specific
+// actions. Existing sub-verbs are rejected; use ReplaceSubHandler when an
+// intentional override is required.
+func (r *CommandRegistry) Extend(def CommandDefinition) error {
+	if def.Verb == "" {
+		return fmt.Errorf("command verb cannot be empty")
+	}
+	if def.Handler == nil {
+		return fmt.Errorf("command handler cannot be nil")
+	}
+	if len(def.SubVerbs) == 0 {
+		return fmt.Errorf("command extension for %s must include at least one sub-verb", strings.ToUpper(def.Verb))
+	}
+	for _, subVerb := range def.SubVerbs {
+		if err := r.RegisterSubHandler(def.Verb, subVerb, def.Handler); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReplaceSubHandler intentionally replaces the handler for an existing
+// sub-verb. It does not add new actions; callers must use Extend first for new
+// sub-verbs. Keeping replacement explicit prevents extension code from
+// accidentally shadowing shared hub behavior.
+func (r *CommandRegistry) ReplaceSubHandler(verb, subVerb string, handler CommandHandler) error {
+	if handler == nil {
+		return fmt.Errorf("command handler cannot be nil")
+	}
+	verb = strings.ToUpper(verb)
+	subVerb = strings.ToUpper(subVerb)
+	if verb == "" || subVerb == "" {
+		return fmt.Errorf("verb and sub-verb are required")
+	}
+
+	val, ok := r.handlers.Load(verb)
+	if !ok {
+		return fmt.Errorf("verb %s not registered", verb)
+	}
+
+	vh := val.(*verbHandler)
+	if _, exists := vh.subHandlers.Load(subVerb); !exists {
+		return fmt.Errorf("sub-verb %s is not registered for verb %s", subVerb, verb)
+	}
+	vh.subHandlers.Store(subVerb, handler)
+	return nil
+}
+
+// ReplaceCommandHandler intentionally replaces the default handler for an
+// existing verb on this registry instance. Prefer Extend/ReplaceSubHandler
+// when a sub-verb boundary exists; this is for verbs such as RUN/RUN-JSON that
+// are single-action commands.
+func (r *CommandRegistry) ReplaceCommandHandler(verb string, handler CommandHandler) error {
+	if handler == nil {
+		return fmt.Errorf("command handler cannot be nil")
+	}
+	verb = strings.ToUpper(verb)
+	if verb == "" {
+		return fmt.Errorf("command verb cannot be empty")
+	}
+
+	val, ok := r.handlers.Load(verb)
+	if !ok {
+		return fmt.Errorf("verb %s not registered", verb)
+	}
+
+	vh := val.(*verbHandler)
+	vh.mu.Lock()
+	vh.handler = handler
+	vh.mu.Unlock()
+	return nil
+}
+
 // Dispatch routes a command to the appropriate handler.
 func (r *CommandRegistry) Dispatch(ctx context.Context, conn *Connection, cmd *protocol.Command) error {
 	verb := strings.ToUpper(cmd.Verb)
@@ -135,8 +210,12 @@ func (r *CommandRegistry) Dispatch(ctx context.Context, conn *Connection, cmd *p
 		}
 	}
 
-	// Fall back to the default handler for the verb
-	return vh.handler(ctx, conn, cmd)
+	vh.mu.RLock()
+	handler := vh.handler
+	vh.mu.RUnlock()
+
+	// Fall back to the default handler for the verb.
+	return handler(ctx, conn, cmd)
 }
 
 // HasVerb checks if a verb is registered.

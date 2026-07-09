@@ -181,6 +181,36 @@ func (h *Hub) RegisterCommand(def CommandDefinition) error {
 	return h.commands.Register(def)
 }
 
+// ExtendCommand adds product-specific sub-verbs to an already registered
+// command without replacing the command's default handler or existing
+// sub-handlers. Extensions are scoped to this Hub instance.
+func (h *Hub) ExtendCommand(def CommandDefinition) error {
+	return h.commands.Extend(def)
+}
+
+// ReplaceSubHandler intentionally replaces one existing sub-verb handler on
+// this Hub instance. It does not add new sub-verbs; use ExtendCommand for that.
+func (h *Hub) ReplaceSubHandler(verb, subVerb string, handler CommandHandler) error {
+	return h.commands.ReplaceSubHandler(verb, subVerb, handler)
+}
+
+// ReplaceCommandHandler intentionally replaces the default handler for an
+// existing command on this Hub instance. Prefer ExtendCommand or
+// ReplaceSubHandler when a sub-verb boundary exists.
+func (h *Hub) ReplaceCommandHandler(verb string, handler CommandHandler) error {
+	return h.commands.ReplaceCommandHandler(verb, handler)
+}
+
+// HasCommand reports whether this Hub instance has a handler for verb.
+func (h *Hub) HasCommand(verb string) bool {
+	return h.commands.HasVerb(verb)
+}
+
+// ValidSubVerbs returns this Hub instance's registered sub-verbs for verb.
+func (h *Hub) ValidSubVerbs(verb string) []string {
+	return h.commands.ValidSubVerbs(verb)
+}
+
 // ProcessManager returns the ProcessManager, or nil if not enabled.
 func (h *Hub) ProcessManager() *process.ProcessManager {
 	return h.pm
