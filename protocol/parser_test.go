@@ -288,17 +288,24 @@ func TestVerbRegistry(t *testing.T) {
 		t.Error("expected CUSTOM to be valid after registration")
 	}
 
-	// Test sub-verbs
-	if !reg.IsSubVerb("STATUS") {
-		t.Error("expected STATUS to be a valid sub-verb")
+	// Sub-verbs are scoped to their verb: STATUS is a PROC sub-verb, not a
+	// free-floating one, so it must not be recognized under another verb.
+	if !reg.IsSubVerbForVerb("PROC", "STATUS") {
+		t.Error("expected STATUS to be a valid PROC sub-verb")
 	}
-	if !reg.IsSubVerb("status") {
-		t.Error("expected lowercase status to be valid")
+	if !reg.IsSubVerbForVerb("proc", "status") {
+		t.Error("expected sub-verb lookup to be case-insensitive")
+	}
+	if reg.IsSubVerbForVerb("CUSTOM", "STATUS") {
+		t.Error("expected STATUS not to be a sub-verb of CUSTOM")
 	}
 
-	reg.RegisterSubVerb("MYCUSTOM")
-	if !reg.IsSubVerb("MYCUSTOM") {
-		t.Error("expected MYCUSTOM to be valid after registration")
+	reg.RegisterSubVerbForVerb("CUSTOM", "MYCUSTOM")
+	if !reg.IsSubVerbForVerb("CUSTOM", "MYCUSTOM") {
+		t.Error("expected MYCUSTOM to be valid for CUSTOM after registration")
+	}
+	if reg.IsSubVerbForVerb("PROC", "MYCUSTOM") {
+		t.Error("registering a sub-verb for one verb leaked it to another")
 	}
 }
 
