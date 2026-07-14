@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -156,6 +157,45 @@ func TestGetVerifiedDescendantsRequiresIdentity(t *testing.T) {
 	}
 	if got := tracker.GetVerifiedDescendants(1000); len(got) != 0 {
 		t.Fatalf("GetVerifiedDescendants() = %v, want none for descendants without identity", got)
+	}
+}
+
+func TestGetVerifiedDescendantsReturnsScannerVerified(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracker := NewFilePIDTracker(FilePIDTrackerConfig{
+		Path: filepath.Join(tmpDir, "pids.json"),
+	})
+
+	// Spawn a real child so os.Getpid() has a genuine, live descendant whose
+	// identity the scanner can capture by walking the /proc parent->child tree.
+	child := exec.Command("sleep", "30")
+	if err := child.Start(); err != nil {
+		t.Fatalf("failed to start child: %v", err)
+	}
+	childPID := child.Process.Pid
+	defer func() {
+		_ = child.Process.Kill()
+		_, _ = child.Process.Wait()
+	}()
+
+	_ = tracker.Add("self", os.Getpid(), os.Getpid(), "/project")
+
+	// The trusted scanner walks the real descendant tree and records identities.
+	tracker.scanDescendants()
+
+	verified := tracker.GetVerifiedDescendants(os.Getpid())
+	if len(verified) == 0 {
+		t.Fatal("expected scanner-verified descendants, got none")
+	}
+	found := false
+	for _, pid := range verified {
+		if pid == childPID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected verified descendants %v to include real child %d", verified, childPID)
 	}
 }
 
