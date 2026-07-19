@@ -47,8 +47,16 @@ type DescendantTracker interface {
 	UpdateDescendants(pid int, descendants []int) error
 }
 
+// VerifiedDescendant carries the identity captured by the trusted scanner with
+// its PID. UPSTREAM: callers must carry this evidence through cleanup instead
+// of re-sampling identity after verification, when the PID may be recycled.
+type VerifiedDescendant struct {
+	PID      int
+	Identity string
+}
+
 type VerifiedDescendantTracker interface {
-	GetVerifiedDescendants(pid int) []int
+	GetVerifiedDescendants(pid int) []VerifiedDescendant
 }
 
 // ManagerConfig holds configuration for the ProcessManager.
@@ -85,6 +93,9 @@ type ProcessManager struct {
 
 	// PID tracking for orphan cleanup
 	pidTracker PIDTracker
+	// UPSTREAM: identities captured by a trusted live descendant walk. Post-Wait
+	// cleanup must not derive ownership from a PID that may already be recycled.
+	cleanupIdentities sync.Map // map[*ManagedProcess]map[int]string
 
 	// Script registry for automatic lifecycle integration
 	scriptRegistry *script.Registry

@@ -188,8 +188,8 @@ func TestGetVerifiedDescendantsReturnsScannerVerified(t *testing.T) {
 		t.Fatal("expected scanner-verified descendants, got none")
 	}
 	found := false
-	for _, pid := range verified {
-		if pid == childPID {
+	for _, descendant := range verified {
+		if descendant.PID == childPID {
 			found = true
 			break
 		}
