@@ -107,6 +107,11 @@ type ProcessManager struct {
 	// only as a test seam to freeze a Start in that window and race Shutdown; it
 	// is always nil in production and costs a single nil check.
 	startGuardHook func()
+	// UPSTREAM: test seams for the actual spawn-vs-shutdown ordering gate. Start
+	// invokes spawnGuardHook while holding startMu after its final flag check;
+	// Shutdown invokes shutdownGuardHook immediately before acquiring startMu.
+	spawnGuardHook    func()
+	shutdownGuardHook func()
 }
 
 // DefaultScanInterval is the default interval for descendant tree scanning.
@@ -325,6 +330,9 @@ func (pm *ProcessManager) Shutdown(ctx context.Context) error {
 		// Order the flag-set against Start's wg.Add under startMu: once this
 		// returns, any Start still holding startMu has already done its wg.Add,
 		// so the wg.Wait below cannot miss its waitForProcess goroutine.
+		if pm.shutdownGuardHook != nil {
+			pm.shutdownGuardHook()
+		}
 		pm.startMu.Lock()
 		pm.shuttingDown.Store(true)
 		pm.startMu.Unlock()
@@ -348,7 +356,16 @@ func (pm *ProcessManager) Shutdown(ctx context.Context) error {
 
 		pm.processes.Range(func(key, value any) bool {
 			proc := value.(*ManagedProcess)
-			if proc.IsRunning() {
+			switch proc.State() {
+			case StateStarting:
+				// UPSTREAM: a Start may already be registered while still in the
+				// pre-spawn window. Cancel its command context; Start's final
+				// shuttingDown check will fail it without spawning, while a Start
+				// already past that check gets an immediately-cancelled Cmd.
+				if proc.cancel != nil {
+					proc.cancel()
+				}
+			case StateRunning:
 				stopWg.Add(1)
 				go func(p *ManagedProcess) {
 					defer stopWg.Done()
@@ -392,10 +409,17 @@ func (pm *ProcessManager) Shutdown(ctx context.Context) error {
 				}
 				return true
 			})
-			<-done
+			// UPSTREAM: StopProcess/forceKill goroutines retain their own
+			// stopWg tickets and honor ctx. Do not defeat the shutdown deadline
+			// by waiting unconditionally after ctx is already done.
 		}
 
-		pm.wg.Wait()
+		// UPSTREAM: never let an in-flight Start or waiter make Shutdown exceed
+		// its caller's deadline. The goroutines retain their own wg tickets and
+		// finish normally after this bounded return.
+		if err := waitForProcessManagerGroup(ctx, &pm.wg); err != nil && shutdownErr == nil {
+			shutdownErr = err
+		}
 
 		errMu.Lock()
 		joinedErr := errors.Join(errs...)
@@ -406,6 +430,20 @@ func (pm *ProcessManager) Shutdown(ctx context.Context) error {
 	})
 
 	return shutdownErr
+}
+
+func waitForProcessManagerGroup(ctx context.Context, wg *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // StopByProjectPath stops all running processes for a specific project path.
