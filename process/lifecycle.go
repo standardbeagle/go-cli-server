@@ -170,8 +170,12 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 	// CREATE_NEW_PROCESS_GROUP makes the child the group leader. We need
 	// this after Wait because Getpgid fails on a dead process.
 	pgid := 0
+	rootIdentity := ""
 	if proc.cmd != nil && proc.cmd.Process != nil {
 		pgid = proc.cmd.Process.Pid
+		// UPSTREAM: capture before Wait; afterward this numeric PID can name an
+		// unrelated process and must not be treated as ownership evidence.
+		rootIdentity = processIdentity(pgid)
 	}
 
 	err := proc.cmd.Wait()
@@ -187,8 +191,14 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 	// snapshot is visible — after Wait the /proc chain is gone, so a live walk
 	// here would find nothing.
 	descendants := proc.Descendants()
+	descendantIDs := make(map[int]string)
+	if stored, ok := pm.cleanupIdentities.LoadAndDelete(proc); ok {
+		for pid, identity := range stored.(map[int]string) {
+			descendantIDs[pid] = identity
+		}
+	}
 	if dt, ok := pm.pidTracker.(VerifiedDescendantTracker); ok {
-		descendants = append(descendants, dt.GetVerifiedDescendants(proc.PID())...)
+		descendants = mergeVerifiedDescendants(descendants, descendantIDs, dt.GetVerifiedDescendants(proc.PID()))
 	} else if dt, ok := pm.pidTracker.(DescendantTracker); ok {
 		descendants = append(descendants, dt.GetDescendants(proc.PID())...)
 	}
@@ -202,9 +212,9 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 	// process managed its own lifetime; its group is already empty.
 	if err != nil {
 		if pgid > 0 {
-			cleanupProcessGroup(pgid)
+			cleanupReapedProcessGroup(pgid, rootIdentity)
 		}
-		killStoredDescendants(descendants)
+		killStoredDescendants(descendants, descendantIDs)
 	}
 
 	// Cleanup platform-specific resources
@@ -284,6 +294,20 @@ func (pm *ProcessManager) waitForProcess(proc *ManagedProcess) {
 	close(proc.done)
 }
 
+// mergeVerifiedDescendants carries scanner-captured identities unchanged into
+// post-Wait cleanup. UPSTREAM: never call processIdentity here; verification
+// and cleanup are separated by a PID-reuse window.
+func mergeVerifiedDescendants(descendants []int, identities map[int]string, verified []VerifiedDescendant) []int {
+	for _, descendant := range verified {
+		if descendant.PID <= 1 || descendant.Identity == "" {
+			continue
+		}
+		descendants = append(descendants, descendant.PID)
+		identities[descendant.PID] = descendant.Identity
+	}
+	return descendants
+}
+
 // Stop terminates a process gracefully.
 func (pm *ProcessManager) Stop(ctx context.Context, id string) error {
 	proc, err := pm.Get(id)
@@ -306,6 +330,9 @@ func (pm *ProcessManager) snapshotDescendants(proc *ManagedProcess) {
 	pid := proc.cmd.Process.Pid
 	descendants := findAllDescendants(pid)
 	proc.SetDescendants(descendants)
+	// UPSTREAM: this walk occurred while the root was confirmed alive, making
+	// it the last safe point to bind numeric descendant PIDs to identities.
+	pm.cleanupIdentities.Store(proc, descendantIdentities(descendants))
 
 	// Mirror the snapshot into the persistent tracker if available so that
 	// the SIGKILL escalation path (which runs after Wait() reaps the root)
