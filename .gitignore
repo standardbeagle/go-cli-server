@@ -8,3 +8,9 @@
 
 # Startup lock files (created by client auto-start)
 *.startup.lock
+
+# worktrack loop state is per-clone (lease holder carries an email); the
+# workspace binding and the workflow manifest are shared, so they are committed.
+.worktrack/*
+!.worktrack/mcp.json
+!.worktrack/templates.json
