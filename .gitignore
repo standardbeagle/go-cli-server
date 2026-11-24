@@ -8,3 +8,7 @@
 
 # Startup lock files (created by client auto-start)
 *.startup.lock
+
+# tman shims
+/test
+/test.cmd
